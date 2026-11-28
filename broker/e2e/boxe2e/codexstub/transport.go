@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 
 	"github.com/ghbmrk/agentos/broker/egress"
 )
 
 // Transport sends https requests for the Codex hosts, with or without a
-// port, to the stub on the unix socket sock, as plain HTTP with the
+// port or the root's trailing dot, to the stub on the unix socket sock, as plain HTTP with the
 // request's own Host, and every other request to fallback. A request for a
 // Codex host on any other scheme fails, so no Codex request leaves for the
 // internet. Only the agentos_e2e egress build uses it.
@@ -38,7 +37,7 @@ type stubTransport struct {
 }
 
 func (t *stubTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if !t.hosts[strings.ToLower(r.URL.Hostname())] {
+	if !t.hosts[hostname(r.URL.Hostname())] {
 		return t.fallback.RoundTrip(r)
 	}
 	if r.URL.Scheme != "https" {

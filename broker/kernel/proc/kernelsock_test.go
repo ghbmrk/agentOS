@@ -1214,11 +1214,11 @@ func TestNewRecoveryHeldUntilDone(t *testing.T) {
 // cleared once encoded, so the kernel keeps only its held copy.
 func TestRecoveryCardReadClearsOnceEncoded(t *testing.T) {
 	bits := bytes.Repeat([]byte{0x5e}, handoff.MadeCardLen)
-	raw, err := json.Marshal(any(recoveryCardRead{bits}))
+	raw, err := json.Marshal(any(RecoveryCardRead{bits}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var back recoveryCardRead
+	var back RecoveryCardRead
 	if err := json.Unmarshal(raw, &back); err != nil || !bytes.Equal(back.Key, bytes.Repeat([]byte{0x5e}, handoff.MadeCardLen)) {
 		t.Fatalf("decoded %x, %v", back.Key, err)
 	}

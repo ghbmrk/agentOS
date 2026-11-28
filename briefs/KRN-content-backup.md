@@ -21,7 +21,7 @@ Since KRN-content the kernel process keeps sealed items in file stores under `-c
 
 **Requirement IDs:** BAK-1, LOG-4.
 
-**Gate:** none. `broker/kernel` and `broker/kernel/proc` are trusted core, so the PR names a one-row D-159 decision in its `Trusted-core:` line.
+**Gate:** none. `broker/kernel` and `broker/kernel/proc` are trusted core, so the PR names a one-row D-159 decision in a `trusted-core #<PR> -- <decision ID>` line it adds to `tools/trusted_base_reasons.txt`.
 
 ## Acceptance tests
 

@@ -151,7 +151,9 @@ func sshKey(r io.Reader) (string, error) {
 	sec = str(sec, pub)
 	sec = str(sec, priv)
 	sec = str(sec, nil) // comment
-	for i := byte(1); len(sec)%8 != 0; i++ {
+	// At most 7 pad bytes, so a broken length test cannot append without end
+	// (the mutant len(sec)*8 grew a test past a CI runner's memory on #6000).
+	for i := byte(1); i < 8 && len(sec)%8 != 0; i++ {
 		sec = append(sec, i)
 	}
 	b := []byte("openssh-key-v1\x00")

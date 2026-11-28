@@ -662,7 +662,8 @@ def work_items(fetch, repo):
 
 def emit(text, out):
     """Write text to stdout, or to out whole: a temporary file beside it, then os.replace, so the
-    file is never empty or half written, even when it is the skeleton render just read."""
+    file is never empty or half written, even when it is the skeleton render just read. FILE is
+    replaced by a new file: a symlink becomes a regular file and the mode resets to the umask's."""
     if not out:
         sys.stdout.write(text)
         return 0
@@ -691,6 +692,8 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
     ap.add_argument("--action", choices=("labeled", "unlabeled"), help="transition: the event")
     ap.add_argument("--out", metavar="FILE", help="render: write FILE whole once rendered, instead of stdout")
     args = ap.parse_args(argv)
+    if args.out and args.command != "render":
+        ap.error("--out is for render only")  # a flag either acts or is refused (#6548)
     if args.command == "intake":
         if not (args.repo and args.issue):
             ap.error("intake needs --repo and --issue")

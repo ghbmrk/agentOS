@@ -9,19 +9,24 @@ package version fails until its source is read again; malformed, empty, repeated
 entries are refused, and every refusal points at the records' reach note.
 VULN-debian-r13-f1 (#6285): it also reads which files import or reach glibc's glob() (and wordexp, which
 calls it), held to the allowlist's [glob] section, so the DEBIAN-CVE-2026-126765 records' reach is
-read from the tree."""
+read from the tree.
+VULN-quic-import-sweep (#6671): it also reads which files import OpenSSL's QUIC entry points or look one up
+through dlsym, held to the allowlist's [quic] section (the openssl CLI alone), so the openssl QUIC records'
+claim that nothing else reaches OpenSSL's QUIC stack is read from the tree."""
 # REQ: EVL-5
 import contextlib
 import ctypes
 import ctypes.util
 import errno
 import fnmatch
+import hashlib
 import importlib.util
 import io
 import os
 import pathlib
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -72,11 +77,12 @@ KRB5KDF = 'const char *k = "KRB5KDF";\nint main(void) { return k[0]; }\n'
 
 
 def newc(members):
-    """A newc cpio archive of MEMBERS (name, mode, content), then the trailer."""
+    """A newc cpio archive of MEMBERS (name, mode, content, and optionally ino and nlink), then the trailer."""
     out = b""
-    for i, (n, mode, body) in enumerate(list(members) + [("TRAILER!!!", 0, b"")]):
+    for i, (n, mode, body, *link) in enumerate(list(members) + [("TRAILER!!!", 0, b"")]):
         name = n.encode() + b"\0"
-        out += b"070701" + b"".join(b"%08X" % v for v in (1000 + i, mode, 0, 0, 1, 0, len(body), 0, 0, 0, 0,
+        ino, nlink = link or (1000 + i, 1)
+        out += b"070701" + b"".join(b"%08X" % v for v in (ino, mode, 0, 0, nlink, 0, len(body), 0, 0, 0, 0,
                                                             len(name), 0))
         out += name + b"\0" * (-(110 + len(name)) % 4) + body + b"\0" * (-len(body) % 4)
     return out
@@ -175,7 +181,11 @@ class ImportSweepTest(Tree):
 
     def test_control(self):
         tree = sweep.run_tree(str(self.tree))
-        # The library imports regcomp, which is what the control asks of a main tree.
+        # The library imports regcomp, which is what the control asks of a main tree; a glibc holding every
+        # mark is the marks' control (#6299, GlibcControlTest).
+        tree["tree"]["glibc"] = {"/usr/lib/libc.so.6": ["glob", "regcomp", "vfwscanf"]}
+        # The host's libc is outside this tree: every NEEDED it leaves unresolved is libc.so.6 (UnresolvedTest).
+        self.assertEqual({n for names in tree["tree"].pop("unresolved").values() for n in names}, {"libc.so.6"})
         self.assertEqual(sweep.problems(tree), [])
         no_regcomp = {"tree": dict(tree["tree"], imports={"/usr/bin/wtool": ["swscanf"]})}
         self.assertEqual(len(sweep.problems(no_regcomp)), 1)
@@ -224,9 +234,9 @@ class ImportSweepTest(Tree):
 
     def test_summary_names_importers_and_reach(self):
         lines = sweep.summary(sweep.run_tree(str(self.tree)))
-        self.assertIn("tree regex: 2 files import a function (or look one up, or carry a static copy), 1 more reach one through a NEEDED library", lines)
+        self.assertIn("tree regex: 2 files import a function (or look one up, or carry a copy), 1 more reach one through a NEEDED library", lines)
         self.assertIn("  via /usr/bin/daemon: /usr/lib/libregex-user.so.1.0.0", lines)
-        self.assertIn("tree wscanf: 1 files import a function (or look one up, or carry a static copy), 0 more reach one through a NEEDED library", lines)
+        self.assertIn("tree wscanf: 1 files import a function (or look one up, or carry a copy), 0 more reach one through a NEEDED library", lines)
         notes = sweep.annotations(lines)
         self.assertTrue(notes and all(n.startswith("::notice title=import sweep ") for n in notes))
         self.assertNotIn("\n", "".join(notes))
@@ -261,7 +271,11 @@ class CipherSitesTest(Tree):
 
     def test_digest_of_each_held_file(self):
         tree = sweep.run_tree(str(self.tree))["tree"]
-        self.assertEqual(set(tree["sha256"]), set(tree["cipher"]))
+        # #6299: and of each file reaching a group, for the pinned [regex] and [glob] entries, and of each
+        # with an unresolved NEEDED name, for [unresolved] (Security on #6382).
+        self.assertEqual(set(tree["sha256"]), set(tree["cipher"]) | {p for _, p in sweep.reach({"t": tree})}
+                         | set(tree["unresolved"]))
+        self.assertIn("/usr/bin/daemon", tree["sha256"])
         self.assertEqual(tree["sha256"]["/usr/bin/spells"],
                          __import__("hashlib").sha256((self.tree / "usr/bin/spells").read_bytes()).hexdigest())
 
@@ -426,19 +440,33 @@ class GlobImportsTest(unittest.TestCase):
 
     def test_summary_lists_the_glob_group(self):
         lines = sweep.summary(self.got)
-        self.assertIn("tree glob: 3 files import a function (or look one up, or carry a static copy), 1 more reach one through a NEEDED library", lines)
+        self.assertIn("tree glob: 3 files import a function (or look one up, or carry a copy), 1 more reach one through a NEEDED library", lines)
         self.assertIn("  via /usr/bin/globd: /usr/lib/libglob-user.so.1.0", lines)
 
     def test_unlisted_importers_fail_and_listed_pass(self):
         listed = ["/usr/lib/libglob-user.so.*", "/usr/bin/globd", "/usr/bin/g64", "/usr/bin/wexp"]
-        self.assertEqual(sweep.refusals(self.got, [], listed), [])
-        errs = sweep.refusals(self.got, [], listed[1:])
+        self.assertEqual(refusals(self.got, [], listed), [])
+        errs = refusals(self.got, [], listed[1:])
         self.assertEqual(errs, ["tree: /usr/lib/libglob-user.so.1.0 imports or reaches glob() and is not in "
                                 "import_sweep.allow [glob]; review it, name it in the -126765 records, then "
-                                "add the entry: /usr/lib/libglob-user.so.1.0"])
+                                "add the entry: /usr/lib/libglob-user.so.1.0 sha256=" + D])
 
 
-E = sweep.Entry
+# #6299: every GLOB entry pins the SHA-256 of the files it accepts. Tests of reach (not of pins) pin every
+# reached file to D, through refusals() below; PinTest holds the pins to the real bytes.
+D = "ab" * 32
+PIN = " sha256=" + D
+
+
+def E(glob, via=False, *pins):
+    return sweep.Entry(glob, via, () if via else tuple(sorted(pins or (D,))))
+
+
+def refusals(places, allow, globs=()):
+    """sweep.refusals with every reached file's SHA-256 D and every plain glob an E entry."""
+    places = {k: dict(v, sha256={p: D for (_, p), at in sweep.reach({k: v}).items()}) for k, v in places.items()}
+    return sweep.refusals(places, [E(e) if isinstance(e, str) else e for e in allow],
+                          [E(e) if isinstance(e, str) else e for e in globs])
 
 
 def place(imports, via=None, scanned=10):
@@ -455,37 +483,37 @@ class RefusalsTest(unittest.TestCase):
                        sha256={"/usr/lib/libcrypto.so.3": "aa" * 32, "/usr/lib/libcs.so.12.1": "0f" * 32})}
 
     def test_allowed_reach_passes(self):
-        self.assertEqual(sweep.refusals(self.OK, self.ALLOW), [])
+        self.assertEqual(refusals(self.OK, self.ALLOW), [])
 
     def test_daemon_importing_regexec_fails(self):
         places = {"tree": dict(self.OK["tree"], imports=dict(self.OK["tree"]["imports"],
                                                              **{"/usr/lib/systemd/systemd": ["regexec"]}))}
-        errs = sweep.refusals(places, self.ALLOW)
+        errs = refusals(places, self.ALLOW)
         self.assertEqual(len(errs), 1)
         self.assertIn("/usr/lib/systemd/systemd imports or reaches a regex function", errs[0])
-        self.assertTrue(errs[0].endswith("entry: /usr/lib/systemd/systemd"))
+        self.assertTrue(errs[0].endswith("entry: /usr/lib/systemd/systemd sha256=" + D))
 
     def test_daemon_reaching_regex_through_a_library_fails(self):
         places = {"initrd:x": place({"/usr/lib/libsmartcols.so.1.1.0": ["regcomp"]},
                                     {"/usr/lib/systemd/systemd-udevd": ["/usr/lib/libsmartcols.so.1.1.0"]}),
                   "tree": self.OK["tree"]}
-        errs = sweep.refusals(places, self.ALLOW)
+        errs = refusals(places, self.ALLOW)
         self.assertEqual(errs, [e for e in errs if "initrd:x: /usr/lib/systemd/systemd-udevd" in e])
         self.assertEqual(len(errs), 1)
 
     def test_rpmatch_counts_as_regex(self):
         places = {"tree": dict(self.OK["tree"], imports=dict(self.OK["tree"]["imports"], **{"/usr/bin/rm": ["rpmatch"]}))}
-        self.assertEqual(len(sweep.refusals(places, self.ALLOW)), 1)
+        self.assertEqual(len(refusals(places, self.ALLOW)), 1)
 
     def test_any_wide_scanf_fails_allowlisted_or_not(self):
         for p in ("/usr/bin/bash", "/usr/lib/systemd/systemd"):
             places = {"tree": dict(self.OK["tree"], imports=dict(self.OK["tree"]["imports"], **{p: self.OK["tree"]["imports"].get(p, []) + ["swscanf"]}))}
             with self.subTest(p=p):
-                errs = sweep.refusals(places, self.ALLOW)
+                errs = refusals(places, self.ALLOW)
                 self.assertEqual(len(errs), 1)
                 self.assertIn("wide scanf", errs[0])
         lib = {"tree": place({"/usr/lib/libw.so.1": ["__isoc99_vswscanf"]}, {"/usr/bin/bash": ["/usr/lib/libw.so.1"]})}
-        self.assertEqual(len([e for e in sweep.refusals(lib, ["/usr/bin/bash"]) if "wide scanf" in e]), 2)
+        self.assertEqual(len([e for e in refusals(lib, ["/usr/bin/bash"]) if "wide scanf" in e]), 2)
 
     def test_glob_reach_is_held_to_the_glob_section_alone(self):
         # #6285: a daemon reaching glob() fails, directly or through a library, and the regex list does not
@@ -495,26 +523,27 @@ class RefusalsTest(unittest.TestCase):
                                                               "/usr/bin/bash": ["regcomp", "glob"]}),
                              via={"/usr/lib/systemd/systemd": ["/usr/lib/libg.so.1"],
                                   "/usr/bin/lsblk": ["/usr/lib/libsmartcols.so.1.1.0"]})}
-        errs = sweep.refusals(glob, self.ALLOW)
+        errs = refusals(glob, self.ALLOW)
         self.assertEqual([e.split(" imports")[0] for e in errs],
                          ["tree: /usr/bin/bash", "tree: /usr/lib/libg.so.1", "tree: /usr/lib/systemd/systemd"])
         self.assertTrue(all("reaches glob() and is not in import_sweep.allow [glob]" in e for e in errs), errs)
-        self.assertEqual(sweep.refusals(glob, self.ALLOW, ["/usr/bin/bash", "/usr/lib/libg.so.*",
+        self.assertEqual(refusals(glob, self.ALLOW, ["/usr/bin/bash", "/usr/lib/libg.so.*",
                                                            "/usr/lib/systemd/systemd"]), [])
         # A [glob] entry matching no glob() importer fails, even one a regex importer matches.
-        self.assertEqual(sweep.refusals(self.OK, self.ALLOW, ["/usr/bin/bash"]),
+        self.assertEqual(refusals(self.OK, self.ALLOW, ["/usr/bin/bash"]),
                          ["import_sweep.allow: [glob] /usr/bin/bash matches no file that reaches glob(); remove it"])
 
     def test_glob_section_is_read_once_and_unknown_sections_fail(self):
         with tempfile.TemporaryDirectory() as d:
             a = pathlib.Path(d) / "allow"
-            a.write_text("/usr/bin/bash\n[glob]\n# why\n/usr/bin/bash  # the shell\n/usr/lib/libg.so.*\n"
-                         "[cipher]\n/usr/lib/libcrypto.so.3 *\n")
+            a.write_text("/usr/bin/bash{0}\n[glob]\n# why\n/usr/bin/bash{0}  # the shell\n/usr/lib/libg.so.*{0}\n"
+                         "[cipher]\n/usr/lib/libcrypto.so.3 *\n".format(PIN))
             self.assertEqual(sweep.read_allow(a), ([E("/usr/bin/bash")], {"/usr/lib/libcrypto.so.3": "*"},
-                                                   [E("/usr/bin/bash"), E("/usr/lib/libg.so.*")]))
-            a.write_text("/usr/bin/bash\n[cipher]\n/usr/lib/libcrypto.so.3 *\n[glob]\n/usr/bin/x\n")
+                                                   [E("/usr/bin/bash"), E("/usr/lib/libg.so.*")], [], [],
+                                                   {"quic": [], "dgram": []}))
+            a.write_text("/usr/bin/bash{0}\n[cipher]\n/usr/lib/libcrypto.so.3 *\n[glob]\n/usr/bin/x{0}\n".format(PIN))
             self.assertEqual(sweep.read_allow(a)[2], [E("/usr/bin/x")])
-            for body, want in (("[glob]\n/usr/bin/x\n[glob]\n", ":3: [glob] is given again"),
+            for body, want in (("[glob]\n/usr/bin/x%s\n[glob]\n" % PIN, ":3: [glob] is given again"),
                                ("[regex]\n", ":1: [regex] is no section"),
                                ("[glob\n", ":1: [glob is no section")):
                 a.write_text(body)
@@ -523,29 +552,43 @@ class RefusalsTest(unittest.TestCase):
                 self.assertIn(want, str(cm.exception))
 
     def test_unused_glob_fails(self):
-        errs = sweep.refusals(self.OK, self.ALLOW + ["/usr/bin/gone"])
+        errs = refusals(self.OK, self.ALLOW + ["/usr/bin/gone"])
         self.assertEqual(errs, ["import_sweep.allow: /usr/bin/gone matches no file that reaches a regex function; remove it"])
 
     def test_summary_exits_one_on_a_refusal(self):
         with tempfile.TemporaryDirectory() as d:
             j, a = pathlib.Path(d) / "p.json", pathlib.Path(d) / "allow"
-            a.write_text("# comment\n/usr/bin/bash  # the shell\n/usr/lib/libsmartcols.so.1.*\n/usr/bin/lsblk\n"
-                         "[glob]\n/usr/sbin/ldconfig\n"
-                         "[cipher]\n/usr/lib/libcs.so.12.* sha256=%s EVP_CIPHER_fetch=1  # why\n"
-                         "/usr/lib/libcrypto.so.3 *\n" % ("0f" * 32))
+            a.write_text("# comment\n/usr/bin/bash{0}  # the shell\n/usr/lib/libsmartcols.so.1.*{0}\n"
+                         "/usr/bin/lsblk{0}\n[glob]\n/usr/sbin/ldconfig{0}\n"
+                         "[cipher]\n/usr/lib/libcs.so.12.* sha256={1} EVP_CIPHER_fetch=1  # why\n"
+                         "/usr/lib/libcrypto.so.3 *\n".format(PIN, "0f" * 32))
             self.assertEqual(sweep.load_allow(a), [E(x) for x in self.ALLOW])
             self.assertEqual(sweep.read_allow(a)[1], {"/usr/lib/libcs.so.12.*": {"sha256": "0f" * 32,
                                                                               "sites": {"EVP_CIPHER_fetch": 1}},
                                                       "/usr/lib/libcrypto.so.3": "*"})
             bad = {"tree": dict(self.OK["tree"], imports=dict(self.OK["tree"]["imports"],
                                                               **{"/usr/lib/systemd/systemd": ["regexec", "swscanf"]}))}
-            # The static-scan control's ldconfig (#6298), accepted by the [glob] entry.
-            ok = {"tree": dict(self.OK["tree"], static={"/usr/sbin/ldconfig": ["glob"]})}
-            bad["tree"]["static"] = ok["tree"]["static"]
-            for places, want in ((ok, 0), (bad, 1)):
+            # The carried-copy control's ldconfig (#6298), accepted by the [glob] entry, and the glibc
+            # holding every mark (#6299); each reaching file holds the bytes its entry pins.
+            ok = {"tree": dict(self.OK["tree"], carries={"/usr/sbin/ldconfig": ["glob"]},
+                               glibc={"/usr/lib/libc.so.6": ["glob", "regcomp", "vfwscanf"]},
+                               sha256=dict(self.OK["tree"]["sha256"], **dict.fromkeys(
+                                   ["/usr/bin/bash", "/usr/lib/libsmartcols.so.1.1.0", "/usr/bin/lsblk",
+                                    "/usr/sbin/ldconfig", "/usr/lib/systemd/systemd"], D)))}
+            for k in ("carries", "glibc", "sha256"):
+                bad["tree"][k] = ok["tree"][k]
+            body = a.read_text()
+            # An unresolved NEEDED name fails --summary until a pinned [unresolved] entry accepts the file,
+            # and a stale [wrapper] entry fails it (L3 and Lens on #6382: each refusal is wired into errs).
+            gone = {"tree": dict(ok["tree"], unresolved={"/usr/bin/lsblk": ["libgone.so.1"]})}
+            for places, extra, want in ((ok, "", 0), (bad, "", 1), (gone, "", 1),
+                                        (gone, "[unresolved]\n/usr/bin/lsblk%s  # never loaded\n" % PIN, 0),
+                                        (gone, "[unresolved]\n/usr/bin/lsblk sha256=%s\n" % ("cd" * 32), 1),
+                                        (ok, "[wrapper]\n/usr/lib/libgone.so.1%s\n" % PIN, 1)):
                 j.write_text(__import__("json").dumps(places))
-                with self.subTest(want=want), contextlib.redirect_stdout(io.StringIO()), \
-                        contextlib.redirect_stderr(io.StringIO()):
+                a.write_text(body + extra)
+                with self.subTest(want=want, extra=extra, unresolved="unresolved" in places["tree"]), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(sweep.main(["--summary", str(j), str(a)]), want)
 
     def test_shipped_allowlist_is_absolute_globs(self):
@@ -564,7 +607,7 @@ class RefusalsTest(unittest.TestCase):
         globs = sweep.read_allow(sweep.ALLOW)[2]
         self.assertTrue(all(g.glob.startswith("/usr/") for g in globs), globs)
         self.assertEqual(len(globs), len(set(globs)))
-        self.assertIn(E("/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so"), globs)
+        self.assertIn(("/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so", False), {g[:2] for g in globs})
 
     def test_bad_cipher_entries_name_the_line(self):
         # L3 6899461135 items 2, 3 and 6, and an entry not keyed to its bytes (#5861).
@@ -583,7 +626,7 @@ class RefusalsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             a = pathlib.Path(d) / "allow"
             for body, want in cases.items():
-                a.write_text("/usr/bin/bash\n[cipher]\n# why\n" + body + "\n")
+                a.write_text("/usr/bin/bash%s\n[cipher]\n# why\n" % PIN + body + "\n")
                 with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
                     sweep.read_allow(a)
                 line = 3 + body.count("\n") + 1
@@ -596,7 +639,7 @@ class RefusalsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             a = pathlib.Path(d) / "allow"
             for hexd in ("0F" * 32, "0f" * 32, "0F0f" * 16):
-                a.write_text("/usr/bin/bash\n[cipher]\n/usr/bin/x sha256=%s GCM-SIV=1\n" % hexd)
+                a.write_text("/usr/bin/bash%s\n[cipher]\n/usr/bin/x sha256=%s GCM-SIV=1\n" % (PIN, hexd))
                 with self.subTest(hexd=hexd):
                     self.assertEqual(sweep.read_allow(a)[1]["/usr/bin/x"],
                                      {"sha256": "0f" * 32, "sites": {"GCM-SIV": 1}})
@@ -772,7 +815,7 @@ class ViaEntryTest(unittest.TestCase):
     ALLOW = REGEX + [E("/usr/bin/bash")]
 
     def errs(self, places, allow=None, globs=()):
-        return sweep.refusals(places, self.ALLOW if allow is None else allow, globs)
+        return refusals(places, self.ALLOW if allow is None else allow, globs)
 
     def test_dependents_of_a_listed_library_need_no_entry(self):
         self.assertEqual(self.errs(self.PLACES), [])
@@ -784,7 +827,7 @@ class ViaEntryTest(unittest.TestCase):
             with self.subTest(syms=syms):
                 self.assertEqual(self.errs(places), [
                     "tree: /usr/bin/lsblk imports or reaches a regex function and is not in import_sweep.allow; "
-                    "review it, name it in the image -100290 record, then add the entry: /usr/bin/lsblk"])
+                    "review it, name it in the image -100290 record, then add the entry: /usr/bin/lsblk sha256=" + D])
                 # Its own entry accepts it.
                 self.assertEqual(self.errs(places, self.ALLOW + [E("/usr/bin/lsblk")]), [])
 
@@ -825,7 +868,7 @@ class ViaEntryTest(unittest.TestCase):
         self.assertEqual(self.errs(places, allow + [E("/usr/bin/x")])[:1],
                          ["tree: /usr/lib/libedit.so.2.0.75 imports or reaches glob() and is not in "
                           "import_sweep.allow [glob]; review it, name it in the -126765 records, then add the "
-                          "entry: /usr/lib/libedit.so.2.0.75"])
+                          "entry: /usr/lib/libedit.so.2.0.75 sha256=" + D])
 
     def test_a_named_entry_still_accepts_a_dependent(self):
         self.assertEqual(self.errs(self.PLACES, self.ALLOW + [E("/usr/bin/lsblk")]), [])
@@ -836,13 +879,13 @@ class ViaEntryTest(unittest.TestCase):
         places = {"tree": place({SHARED_LIB: ["glob64"], "/usr/bin/bash": ["regcomp"]},
                                 {"/usr/bin/bash": [SHARED_LIB]})}
         allow = [E("/usr/bin/bash")]
-        self.assertEqual([e.split(" and is")[0] for e in sweep.refusals(places, allow, [E(SHARED_LIB)])],
+        self.assertEqual([e.split(" and is")[0] for e in refusals(places, allow, [E(SHARED_LIB)])],
                          ["tree: /usr/bin/bash imports or reaches glob()"])
-        self.assertEqual(sweep.refusals(places, allow, [E(SHARED_LIB), E(SHARED_LIB, True)]), [])
+        self.assertEqual(refusals(places, allow, [E(SHARED_LIB), E(SHARED_LIB, True)]), [])
         # And glob() imported directly with the library via is not accepted by the via entry.
         places["tree"]["imports"]["/usr/bin/bash"].append("glob")
         self.assertEqual([e.split(" and is")[0].split(" accepts")[0]
-                          for e in sweep.refusals(places, allow, [E(SHARED_LIB), E(SHARED_LIB, True)])],
+                          for e in refusals(places, allow, [E(SHARED_LIB), E(SHARED_LIB, True)])],
                          ["tree: /usr/bin/bash imports or reaches glob()", "import_sweep.allow: [glob] via " + SHARED_LIB])
 
     def test_summary_counts_a_direct_importer_once(self):
@@ -850,21 +893,30 @@ class ViaEntryTest(unittest.TestCase):
         places = {"tree": place({SMARTCOLS: ["regcomp"], "/usr/sbin/fdisk": ["rpmatch"]},
                                 {"/usr/sbin/fdisk": [SMARTCOLS], "/usr/bin/lsblk": [SMARTCOLS]})}
         lines = sweep.summary(places)
-        self.assertIn("tree regex: 2 files import a function (or look one up, or carry a static copy), 1 more reach one through a NEEDED library", lines)
+        self.assertIn("tree regex: 2 files import a function (or look one up, or carry a copy), 1 more reach one through a NEEDED library", lines)
         self.assertNotIn("  via /usr/sbin/fdisk: " + SMARTCOLS, lines)
 
     def test_entries_parse_and_bad_lines_name_the_line(self):
         with tempfile.TemporaryDirectory() as d:
             a = pathlib.Path(d) / "allow"
-            a.write_text("/usr/lib/libs.so.*\nvia /usr/lib/libs.so.*  # its users\n[glob]\nvia  /usr/lib/libg.so.*\n")
+            a.write_text("/usr/lib/libs.so.*%s\nvia /usr/lib/libs.so.*  # its users\n[glob]\nvia  /usr/lib/libg.so.*\n" % PIN)
             self.assertEqual(sweep.read_allow(a), ([E("/usr/lib/libs.so.*"), E("/usr/lib/libs.so.*", True)], {},
-                                                   [E("/usr/lib/libg.so.*", True)]))
-            for body, want in (("via\n", ":1: via is not an entry; a regex entry is GLOB or via GLOB"),
+                                                   [E("/usr/lib/libg.so.*", True)], [], [],
+                                                   {"quic": [], "dgram": []}))
+            for body, want in (("via\n", ":1: via is not an entry; a regex entry is " + sweep.ENTRY_FORMAT),
                                ("via /a /b\n", ":1: via /a /b is not an entry"),
+                               ("via /a%s\n" % PIN, "is not an entry"),
                                ("/a /b\n", ":1: /a /b is not an entry"),
                                ("/a sha256=00\n", ":1: /a sha256=00 is not an entry"),
-                               ("[glob]\n/a b\n", ":2: /a b is not an entry; a [glob] entry is GLOB or via GLOB"),
-                               ("/a\n/a\n", ":2: /a is given again"),
+                               ("/a%s b\n" % PIN, "is not an entry"),
+                               ("sha256=%s\n" % D, "is not an entry"),
+                               ("[glob]\n/a b\n", ":2: /a b is not an entry; a [glob] entry is " + sweep.ENTRY_FORMAT),
+                               # #6299: a GLOB entry that pins no file's bytes, or one twice, is refused.
+                               ("/a\n", ":1: /a pins no SHA-256"),
+                               ("[glob]\n/usr/bin/node  # its dlsym names\n", ":2: /usr/bin/node pins no SHA-256"),
+                               ("/a%s%s\n" % (PIN, PIN.upper().replace("SHA", "sha")), "gives a SHA-256 twice"),
+                               ("/a%s\n/a%s\n" % (PIN, PIN), ":2: /a%s is given again" % PIN),
+                               ("/a%s\n/a sha256=%s\n" % (PIN, "cd" * 32), ":2: /a sha256=%s is given again" % ("cd" * 32)),
                                ("[glob]\nvia /a\nvia   /a\n", ":3: via   /a is given again")):
                 a.write_text(body)
                 with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
@@ -872,21 +924,23 @@ class ViaEntryTest(unittest.TestCase):
                 self.assertIn(want, str(cm.exception))
 
     def test_shipped_lists_are_collapsed(self):
-        regex, _, globs = sweep.read_allow(sweep.ALLOW)
+        regex, _, globs, _, _, _ = sweep.read_allow(sweep.ALLOW)
         for section in (regex, globs):
             for e in section:
                 with self.subTest(e=e):
                     # Every via entry names a library that has its own entry, so it can accept a file.
-                    self.assertTrue(not e.via or E(e.glob) in section, e)
+                    self.assertTrue(not e.via or (e.glob, False) in {(x.glob, x.via) for x in section}, e)
+                    # #6299: and every other entry pins the bytes of each file it accepts.
+                    self.assertTrue(e.via or e.sha256, e)
         self.assertIn(E(SHARED_LIB.replace("257", "*"), True), globs)
-        named = {e.glob for e in globs}
+        named = {e.glob for e in globs if not e.via}
         for dependent in ("/usr/bin/systemctl", "/usr/lib/systemd/systemd", "/usr/lib/systemd/systemd-networkd",
                           "/usr/sbin/nft", "/usr/sbin/cryptsetup"):
             self.assertNotIn(dependent, named)
         self.assertNotIn("/usr/bin/lsblk", {e.glob for e in regex})
         # A file importing the function itself keeps its own entry: fdisk's rpmatch, ip's glob64.
-        self.assertIn(E("/usr/sbin/fdisk"), regex)
-        self.assertIn(E("/usr/bin/ip"), globs)
+        self.assertIn("/usr/sbin/fdisk", {e.glob for e in regex if not e.via})
+        self.assertIn("/usr/bin/ip", named)
 
 
 @NEEDS_CC
@@ -912,38 +966,47 @@ class CrossGroupReachTest(unittest.TestCase):
             got = sweep.run_tree(str(t / "tree"))
         self.assertEqual(got["tree"]["imports"]["/usr/bin/both"], ["rpmatch"])
         self.assertEqual(got["tree"]["via"], {"/usr/bin/both": ["/usr/lib/libglob-user.so.1.0"]})
-        errs = sweep.refusals(got, [E("/usr/bin/both")], [E("/usr/lib/libglob-user.so.*")])
+        errs = refusals(got, [E("/usr/bin/both")], [E("/usr/lib/libglob-user.so.*")])
         self.assertEqual([e.split(" and is")[0] for e in errs], ["tree: /usr/bin/both imports or reaches glob()"])
-        self.assertEqual(sweep.refusals(got, [E("/usr/bin/both")], [E("/usr/lib/libglob-user.so.*"),
+        self.assertEqual(refusals(got, [E("/usr/bin/both")], [E("/usr/lib/libglob-user.so.*"),
                                                                      E("/usr/lib/libglob-user.so.*", True)]), [])
         # The summary counts it among the glob group's reachers, not its importers.
         lines = sweep.summary(got)
-        self.assertIn("tree glob: 1 files import a function (or look one up, or carry a static copy), 1 more reach one through a NEEDED library", lines)
-        self.assertIn("tree regex: 1 files import a function (or look one up, or carry a static copy), 0 more reach one through a NEEDED library", lines)
+        self.assertIn("tree glob: 1 files import a function (or look one up, or carry a copy), 1 more reach one through a NEEDED library", lines)
+        self.assertIn("tree regex: 1 files import a function (or look one up, or carry a copy), 0 more reach one through a NEEDED library", lines)
 
 
 # #6298: what no import shows. Static copies, stripped as the image ships them; dlsym callers.
 STATIC_REGEX = "#include <regex.h>\nint main(int c, char **v) { regex_t r; return regcomp(&r, v[0], 0); }\n"
 STATIC_WSCANF = WSCANF
-# A dynamic file holding the regex engine's marks as its own strings: only a static file is read for them.
+# #6299: a dynamic file holding the marks embeds glibc's code (libc_pic objects, a gnulib copy): it carries
+# a copy as a static file does, with an interpreter and libraries or without.
 MARKS_ONLY = ('const char *m[] = {"Invalid preceding regular expression", "glob_in_dir", "__vfwscanf_internal"};\n'
               'int main(int c, char **v) { return m[c][0]; }\n')
-# The same marks in a file naming an interpreter but no library (no libc at all), which is not static either.
 INTERP_ONLY = ('const char *m[] = {"glob_in_dir", "__vfwscanf_internal"};\n'
                'void _start(void) { for (;;) __asm__ volatile("" :: "r"(m)); }\n')
-# A static file holding strings that only contain the marks: no mark is a whole string of its.
-STATIC_NEAR = ('const char *m[] = {"xglob_in_dir", "__vfwscanf_internal2", "Invalid preceding regular expressions"};\n'
+# A static file holding strings that only contain the marks: no mark ends a string of its.
+STATIC_NEAR = ('const char *m[] = {"glob_in_dirx", "__vfwscanf_internal2", "Invalid preceding regular expressions"};\n'
                'int main(int c, char **v) { return m[c][0]; }\n')
 LOOKS_UP = ('#include <dlfcn.h>\nint main(int c, char **v) { return dlsym(RTLD_DEFAULT, c ? "glob" : "regcomp") != 0; }\n')
 # A file importing both dlvsym and dlsym looks a compat-only name up through dlvsym.
 LOOKS_UP_V = ('#include <dlfcn.h>\nint main(int c, char **v) { return dlvsym(RTLD_DEFAULT, c ? "__isoc99_swscanf" : "step", '
               'c ? "GLIBC_2.7" : "GLIBC_2.2.5") != dlsym(RTLD_DEFAULT, "x"); }\n')
-# Names that are no group function's whole name, compat-only names dlsym cannot return (COMPAT_ONLY), and a
-# group name held by a file that cannot look it up.
-LOOKS_UP_OTHER = ('#include <dlfcn.h>\nconst char *n[] = {"globber", "my_regcomp", "step", "advance"};\n'
+# Strings no group function's name ends (store_value holds "re_" but no glibc re_* name: RE_NAMES),
+# compat-only names dlsym cannot return (COMPAT_ONLY), and a group name held by a file that cannot look it up.
+LOOKS_UP_OTHER = ('#include <dlfcn.h>\nconst char *n[] = {"globber", "regcomp2", "store_value", "step", "advance"};\n'
                   'int main(int c, char **v) { return dlsym(RTLD_DEFAULT, n[c]) != 0; }\n')
 HOLDS_NAME = 'const char *n = "glob";\nint main(void) { return n[0]; }\n'
 LIB_LOOKS_UP = '#include <dlfcn.h>\nint f(void) { return dlsym(RTLD_DEFAULT, "wordexp") != 0; }\n'
+# #6299 (L3 on #6339): a file holding a group name that looks it up through a NEEDED library's wrapper
+# around dlsym (liblook's f stands in for it), directly or through a library between; and through a dlvsym
+# wrapper, a compat-only name.
+WRAPPED = 'int f(void);\nconst char *n[] = {"glob", "step"};\nint main(int c, char **v) { return f() + n[c][0]; }\n'
+MIDDLE = 'int f(void);\nint g(void) { return f(); }\n'
+WRAPPED_MID = WRAPPED.replace("f()", "g()").replace("int f", "int g")
+LIB_VLOOKS_UP = '#include <dlfcn.h>\nvoid *h(const char *n) { return dlvsym(RTLD_DEFAULT, n, "GLIBC_2.2.5"); }\n'
+WRAPPED_V = ('void *h(const char *);\nconst char *n[] = {"step", "advance"};\n'
+             'int main(int c, char **v) { return h(n[c]) != 0; }\n')
 
 
 @NEEDS_CC
@@ -979,43 +1042,73 @@ class UnimportedReachTest(unittest.TestCase):
         cc("holds.c", HOLDS_NAME, cls.tree / "usr/bin/holds")
         cc("liblook.c", LIB_LOOKS_UP, lib / "liblook.so.1", "-shared", "-fPIC", "-Wl,-soname,liblook.so.1", "-ldl")
         cc("uses.c", USES_LIB, cls.tree / "usr/bin/user", "-L" + str(lib), "-l:liblook.so.1")
+        cc("wrapped.c", WRAPPED, cls.tree / "usr/bin/wrapped", "-L" + str(lib), "-l:liblook.so.1")
+        cc("mid.c", MIDDLE, lib / "libmid.so.1", "-shared", "-fPIC", "-Wl,-soname,libmid.so.1", "-L" + str(lib),
+           "-l:liblook.so.1")
+        cc("wrappedmid.c", WRAPPED_MID, cls.tree / "usr/bin/wrappedmid", "-L" + str(lib), "-l:libmid.so.1",
+           "-Wl,-rpath-link," + str(lib))
+        cc("libvlook.c", LIB_VLOOKS_UP, lib / "libvlook.so.1", "-shared", "-fPIC", "-Wl,-soname,libvlook.so.1",
+           "-ldl")
+        cc("wrappedv.c", WRAPPED_V, cls.tree / "usr/bin/wrappedv", "-L" + str(lib), "-l:libvlook.so.1")
         cls.got = sweep.run_tree(str(cls.tree))
 
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def test_static_copies_are_read_by_glibc_marks(self):
+    def test_carried_copies_are_read_by_glibc_marks(self):
         got = self.got["tree"]
-        self.assertEqual(got["static"], {"/usr/sbin/ldconfig": ["glob"], "/usr/sbin/spie": ["glob"],
-                                         "/usr/sbin/sregex": ["regcomp"], "/usr/sbin/swide": ["vfwscanf"]})
-        # A file holding the marks as its own strings that names a library or an interpreter is not a static
-        # copy, and imports nothing.
+        # Static copies, and (#6299) dynamic files embedding the code, with or without libraries.
+        self.assertEqual(got["carries"], {"/usr/sbin/ldconfig": ["glob"], "/usr/sbin/spie": ["glob"],
+                                          "/usr/sbin/sregex": ["regcomp"], "/usr/sbin/swide": ["vfwscanf"],
+                                          "/usr/bin/marks": ["glob", "regcomp", "vfwscanf"],
+                                          "/usr/lib/libmarks.so.1": ["glob", "regcomp", "vfwscanf"],
+                                          "/usr/bin/interp": ["glob", "vfwscanf"]})
         for p in ("/usr/bin/marks", "/usr/lib/libmarks.so.1", "/usr/bin/interp"):
             self.assertNotIn(p, got["imports"])
-        self.assertEqual(got["unread"], [])
+        self.assertEqual((got["unread"], got["packed"]), ([], {}))
 
     def test_lookups_are_whole_group_names_beside_dlsym(self):
         got = self.got["tree"]
         self.assertEqual(got["lookups"], {"/usr/bin/lookup": ["glob", "regcomp"],
                                           "/usr/bin/lookupv": ["__isoc99_swscanf", "step"],
-                                          "/usr/lib/liblook.so.1": ["wordexp"]})
+                                          "/usr/lib/liblook.so.1": ["wordexp"],
+                                          "/usr/bin/wrapped": ["glob"], "/usr/bin/wrappedmid": ["glob"],
+                                          "/usr/bin/wrappedv": ["advance", "step"]})
         # A library that looks one up is reached through, as an importing library is.
-        self.assertEqual(got["via"], {"/usr/bin/user": ["/usr/lib/liblook.so.1"]})
+        self.assertEqual(got["via"], {"/usr/bin/user": ["/usr/lib/liblook.so.1"],
+                                      "/usr/bin/wrapped": ["/usr/lib/liblook.so.1"],
+                                      "/usr/bin/wrappedmid": ["/usr/lib/liblook.so.1"],
+                                      "/usr/lib/libmid.so.1": ["/usr/lib/liblook.so.1"]})
+
+    def test_a_lookup_through_a_wrapper_is_the_callers_own(self):
+        # #6299: the name is the caller's, so a via entry for the wrapper's library does not accept it.
+        globs = [E("/usr/lib/liblook.so.1"), E("/usr/lib/liblook.so.1", True)]
+        errs = [e for e in refusals(self.got, [], globs) if "glob()" in e]
+        self.assertEqual(sorted(e.split(": ", 1)[1].split(" imports")[0] for e in errs),
+                         ["/usr/bin/interp", "/usr/bin/lookup", "/usr/bin/marks", "/usr/bin/wrapped",
+                          "/usr/bin/wrappedmid", "/usr/lib/libmarks.so.1", "/usr/sbin/ldconfig", "/usr/sbin/spie"])
+        # A dlsym-only wrapper cannot return a compat-only name: wrapped holds "step" too, which is not counted.
+        self.assertEqual(self.got["tree"]["lookups"]["/usr/bin/wrapped"], ["glob"])
 
     def test_each_counts_as_its_own_import(self):
-        errs = sweep.refusals(self.got, [], [])
+        errs = refusals(self.got, [], [])
         refused = sorted(e.split(" imports or reaches ")[0].split(": ", 1)[1] for e in errs)
-        self.assertEqual(refused, ["/usr/bin/lookup", "/usr/bin/lookup", "/usr/bin/lookupv", "/usr/bin/lookupv",
-                                   "/usr/bin/user",
-                                   "/usr/lib/liblook.so.1", "/usr/sbin/ldconfig", "/usr/sbin/spie",
-                                   "/usr/sbin/sregex", "/usr/sbin/swide"])
-        regex = [E("/usr/bin/lookup"), E("/usr/bin/lookupv"), E("/usr/sbin/sregex")]
+        self.assertEqual(refused, sorted(["/usr/bin/lookup", "/usr/bin/lookup", "/usr/bin/lookupv", "/usr/bin/lookupv",
+                                          "/usr/bin/user", "/usr/bin/wrapped", "/usr/bin/wrappedmid",
+                                          "/usr/bin/wrappedv", "/usr/lib/liblook.so.1", "/usr/lib/libmid.so.1",
+                                          "/usr/sbin/ldconfig",
+                                          "/usr/sbin/spie", "/usr/sbin/sregex", "/usr/sbin/swide"]
+                                         + ["/usr/bin/interp"] * 2 + ["/usr/bin/marks", "/usr/lib/libmarks.so.1"] * 3))
+        embedded = ["/usr/bin/marks", "/usr/lib/libmarks.so.1", "/usr/bin/interp"]
+        regex = [E("/usr/bin/lookup"), E("/usr/bin/lookupv"), E("/usr/sbin/sregex"), E("/usr/bin/wrappedv")]
+        regex += [E(p) for p in embedded[:2]]
         globs = [E("/usr/bin/lookup"), E("/usr/sbin/ldconfig"), E("/usr/sbin/spie"), E("/usr/lib/liblook.so.1"),
-                 E("/usr/lib/liblook.so.1", True)]
-        errs = sweep.refusals(self.got, regex, globs)
-        # The wide scanf group has no allowed file, a static copy or a lookup included.
-        self.assertEqual(sorted(e.split(":")[1].split()[0] for e in errs), ["/usr/bin/lookupv", "/usr/sbin/swide"])
+                 E("/usr/lib/liblook.so.1", True), E("/usr/bin/wrapped"), E("/usr/bin/wrappedmid")]
+        errs = refusals(self.got, regex, globs + [E(p) for p in embedded])
+        # The wide scanf group has no allowed file, a static copy, an embedded one or a lookup included.
+        self.assertEqual(sorted(e.split(":")[1].split()[0] for e in errs), sorted(["/usr/bin/lookupv", "/usr/sbin/swide"]
+                                                                                  + embedded))
         self.assertTrue(all("wide scanf" in e for e in errs), errs)
 
     def test_compat_only_names_are_glibcs_hidden_ones(self):
@@ -1041,20 +1134,23 @@ class UnimportedReachTest(unittest.TestCase):
         self.assertIn("  carries /usr/sbin/ldconfig: glob", lines)
         self.assertIn("  looks up /usr/bin/lookup: regcomp", lines)
         self.assertIn("  via /usr/bin/user: /usr/lib/liblook.so.1", lines)
-        self.assertIn("tree glob: 4 files import a function (or look one up, or carry a static copy), 1 more reach "
+        self.assertIn("  looks up /usr/bin/wrapped: glob", lines)
+        self.assertIn("  carries /usr/bin/marks: glob", lines)
+        self.assertIn("tree glob: 9 files import a function (or look one up, or carry a copy), 2 more reach "
                       "one through a NEEDED library", lines)
 
     def test_static_control(self):
         tree = self.got["tree"]
-        want = ("tree: no static file carries glob() (ldconfig always does), so the static scan's marks read "
-                "nothing they should have (control)")
-        base = dict(tree, imports={"/usr/bin/bash": ["regcomp"]}, cipher={"/l": {"EVP_CIPHER_fetch": 1}})
+        want = ("tree: no file carries glob() (Debian's static ldconfig always does), so the scan reads no "
+                "carried copy (control)")
+        base = dict(tree, imports={"/usr/bin/bash": ["regcomp"]}, cipher={"/l": {"EVP_CIPHER_fetch": 1}},
+                    glibc={"/usr/lib/libc.so.6": ["glob", "regcomp", "vfwscanf"]}, unresolved={})
         self.assertEqual(sweep.problems({"tree": base}), [])
-        for static in ({}, {"/usr/sbin/sregex": ["regcomp"]}):
-            with self.subTest(static=static):
-                self.assertEqual(sweep.problems({"tree": dict(base, static=static)}), [want])
+        for carries in ({}, {"/usr/sbin/sregex": ["regcomp"]}):
+            with self.subTest(carries=carries):
+                self.assertEqual(sweep.problems({"tree": dict(base, carries=carries)}), [want])
         # An initrd's static copy is no main-tree control.
-        self.assertEqual(sweep.problems({"tree": dict(base, static={}), "initrd:x": dict(base, others=0)}), [want])
+        self.assertEqual(sweep.problems({"tree": dict(base, carries={}), "initrd:x": dict(base, others=0)}), [want])
 
 
 class PerGroupLibraryTest(unittest.TestCase):
@@ -1067,4 +1163,868 @@ class PerGroupLibraryTest(unittest.TestCase):
         self.assertEqual(sweep.reach(places)[("glob", "/usr/bin/both")], {"tree": (False, ["/usr/lib/libg.so.1"])})
         regex = [E("/usr/lib/libr.so.1"), E("/usr/lib/libr.so.1", True)]
         globs = [E("/usr/lib/libg.so.1"), E("/usr/lib/libg.so.1", True)]
-        self.assertEqual(sweep.refusals(places, regex, globs), [])
+        self.assertEqual(refusals(places, regex, globs), [])
+
+
+def built(src, out, *args):
+    """OUT built from the C source SRC with the host's cc."""
+    c = pathlib.Path(str(out) + ".c")
+    c.write_text(src)
+    subprocess.run(["cc", "-D_GNU_SOURCE", "-o", str(out), str(c), *args], check=True)
+    c.unlink()
+    return out
+
+
+def host_libc():
+    """The path of the libc.so.6 this process has mapped."""
+    return next(line.split()[-1] for line in pathlib.Path("/proc/self/maps").read_text().splitlines()
+                if re.search(r"/libc\.so\.6$", line))
+
+
+def host_ld():
+    """The path of the dynamic loader this process has mapped, which libc.so.6 needs."""
+    return next(line.split()[-1] for line in pathlib.Path("/proc/self/maps").read_text().splitlines()
+                if re.search(r"/ld-linux-x86-64\.so\.2$", line))
+
+
+@NEEDS_CC
+class PinTest(unittest.TestCase):
+    """VULN-debian-r13-f4 (#6299): every GLOB entry of the regex and [glob] sections pins the SHA-256 of each
+    file it accepts, as [cipher] entries do, so a new version of a reviewed file, or another file its glob
+    comes to match, fails until reviewed: an entry justified by a binary's dlsym names (node's) among them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.tree = pathlib.Path(cls.tmp.name) / "tree"
+        (cls.tree / "usr/bin").mkdir(parents=True)
+        # node's [glob] entry: a dlsym caller holding "glob", justified by the names its dlsym calls take.
+        built(LOOKS_UP.replace('"regcomp"', '"x"'), cls.tree / "usr/bin/node", "-ldl")
+        built(RPMATCH, cls.tree / "usr/bin/rm")
+        built(RPMATCH.replace("v[0]", "v[1]"), cls.tree / "usr/bin/rm2")
+        cls.got = sweep.run_tree(str(cls.tree))
+        cls.sha = {p: hashlib.sha256((cls.tree / p.lstrip("/")).read_bytes()).hexdigest()
+                   for p in ("/usr/bin/node", "/usr/bin/rm", "/usr/bin/rm2")}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def entry(self, glob, *paths):
+        return sweep.Entry(glob, False, tuple(sorted({self.sha[p] for p in paths})))
+
+    def test_the_reviewed_bytes_pass(self):
+        self.assertEqual(self.got["tree"]["lookups"], {"/usr/bin/node": ["glob"]})
+        self.assertEqual({p: self.got["tree"]["sha256"][p] for p in self.sha}, self.sha)
+        self.assertEqual(sweep.refusals(self.got, [self.entry("/usr/bin/rm*", "/usr/bin/rm", "/usr/bin/rm2")],
+                                        [self.entry("/usr/bin/node", "/usr/bin/node")]), [])
+
+    def test_new_bytes_fail_until_pinned(self):
+        # A node built to look up another name has other bytes: its review no longer holds.
+        regex = [self.entry("/usr/bin/rm*", "/usr/bin/rm", "/usr/bin/rm2")]
+        stale = [sweep.Entry("/usr/bin/node", False, ("cd" * 32,))]
+        self.assertEqual(sweep.refusals(self.got, regex, stale), [
+            "tree: /usr/bin/node reaches glob() and holds other bytes than import_sweep.allow [glob] /usr/bin/node "
+            "pins (a new version, or another file it matches); review it again, then pin them: /usr/bin/node "
+            "sha256=" + self.sha["/usr/bin/node"],
+            "import_sweep.allow: [glob] /usr/bin/node pins sha256=%s, which no file it accepts holds; remove it"
+            % ("cd" * 32)])
+
+    def test_an_unpinned_entry_accepts_nothing(self):
+        for globs in (["/usr/bin/node"], [sweep.Entry("/usr/bin/node")]):
+            with self.subTest(globs=globs):
+                errs = sweep.refusals(self.got, [self.entry("/usr/bin/rm*", "/usr/bin/rm", "/usr/bin/rm2")], globs)
+                self.assertEqual(len(errs), 1)
+                self.assertIn("/usr/bin/node reaches glob() and holds other bytes", errs[0])
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            a.write_text("[glob]\n# its dlsym names are fixed\n/usr/bin/node\n")
+            with self.assertRaises(SystemExit) as cm:
+                sweep.read_allow(a)
+            self.assertIn(":3: /usr/bin/node pins no SHA-256", str(cm.exception))
+
+    def test_a_glob_pins_each_file_it_accepts(self):
+        # One glob over two files with other bytes pins both: a file it comes to match is read first.
+        one = [self.entry("/usr/bin/rm*", "/usr/bin/rm")]
+        node = [self.entry("/usr/bin/node", "/usr/bin/node")]
+        self.assertEqual([e.split(" reaches")[0] for e in sweep.refusals(self.got, one, node)],
+                         ["tree: /usr/bin/rm2"])
+        # And a pin no accepted file holds fails, so a replaced version's pin does not linger.
+        extra = [sweep.Entry("/usr/bin/rm*", False, tuple(sorted([self.sha["/usr/bin/rm"], self.sha["/usr/bin/rm2"],
+                                                                  "cd" * 32])))]
+        self.assertEqual(sweep.refusals(self.got, extra, node), [
+            "import_sweep.allow: /usr/bin/rm* pins sha256=%s, which no file it accepts holds; remove it" % ("cd" * 32)])
+
+    def test_a_pin_holds_in_every_place(self):
+        # The same path in an initrd with other bytes fails there, though its main-tree copy passes.
+        initrd = dict(self.got["tree"], sha256=dict(self.got["tree"]["sha256"], **{"/usr/bin/rm": "cd" * 32}))
+        places = {"tree": self.got["tree"], "initrd:x": initrd}
+        errs = sweep.refusals(places, [self.entry("/usr/bin/rm*", "/usr/bin/rm", "/usr/bin/rm2")],
+                              [self.entry("/usr/bin/node", "/usr/bin/node")])
+        self.assertEqual(errs, ["initrd:x: /usr/bin/rm reaches a regex function and holds other bytes than "
+                                "import_sweep.allow /usr/bin/rm* pins (a new version, or another file it matches); "
+                                "review it again, then pin them: /usr/bin/rm* sha256=" + "cd" * 32])
+
+    def test_a_via_entry_needs_no_pin(self):
+        places = {"tree": dict(place({"/usr/lib/libs.so.1": ["regcomp"]}, {"/usr/bin/lsblk": ["/usr/lib/libs.so.1"]}),
+                               sha256={"/usr/lib/libs.so.1": D, "/usr/bin/lsblk": "cd" * 32})}
+        self.assertEqual(sweep.refusals(places, [E("/usr/lib/libs.so.*"), E("/usr/lib/libs.so.*", True)]), [])
+
+
+@NEEDS_CC
+class GlibcControlTest(unittest.TestCase):
+    """#6299 (L3 and Security on #6339): the marks are checked against every glibc the image holds, not only
+    the runner's libc.a; a glibc is not a carried copy of itself."""
+
+    def test_every_glibc_holds_every_mark(self):
+        with tempfile.TemporaryDirectory() as t:
+            tree = pathlib.Path(t)
+            (tree / "usr/lib/x86_64-linux-gnu").mkdir(parents=True)
+            shutil.copy(host_libc(), tree / "usr/lib/x86_64-linux-gnu/libc.so.6")
+            shutil.copy(host_ld(), tree / "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2")
+            (tree / "usr/sbin").mkdir()
+            built(STATIC_GLOB, tree / "usr/sbin/ldconfig", "-static", "-s")
+            got = sweep.run_tree(str(tree))["tree"]
+        self.assertEqual(got["glibc"], {"/usr/lib/x86_64-linux-gnu/libc.so.6": ["glob", "regcomp", "vfwscanf"]})
+        self.assertEqual(got["carries"], {"/usr/sbin/ldconfig": ["glob"]})
+        base = dict(got, imports={"/usr/bin/bash": ["regcomp"]}, cipher={"/l": {"EVP_CIPHER_fetch": 1}})
+        self.assertEqual(sweep.problems({"tree": base}), [])
+        self.assertEqual(sweep.problems({"tree": dict(base, glibc={})}),
+                         ["tree: no glibc (libc.so.6) read, so the marks are checked against none (control)"])
+        # A glibc lacking a mark, in the tree (a guest's among them) or an initrd, fails for that mark.
+        lacking = {"/usr/lib/agentos/images/g/lib/libc.so.6": ["glob", "vfwscanf"]}
+        want = ("the glibc /usr/lib/agentos/images/g/lib/libc.so.6 holds no regcomp mark, so carried copies of "
+                "that code would pass unread (control)")
+        self.assertEqual(sweep.problems({"tree": dict(base, glibc=dict(base["glibc"], **lacking))}), ["tree: " + want])
+        initrd = dict(base, others=0, glibc=lacking)
+        self.assertEqual(sweep.problems({"tree": base, "initrd:x": initrd}), ["initrd:x: " + want])
+
+
+# #6299 (Security on #6339): packed code. A program whose glob() call no import or mark would show once packed.
+PACKED_SRC = STATIC_GLOB
+
+
+@NEEDS_CC
+class PackedTest(unittest.TestCase):
+    """#6299: a file whose code is not in its bytes as stored (a UPX-style packer drops the section table and
+    unpacks into memory), or whose headers do not parse, is flagged and fails the step."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = cls.tree = pathlib.Path(cls.tmp.name)
+        plain = built(PACKED_SRC, t / "plain", "-static", "-s").read_bytes()
+        built(PLAIN, t / "dynamic")
+
+        def patched(name, data, *edits):
+            data = bytearray(data)
+            for off, fmt, value in edits:
+                struct.pack_into("<" + fmt, data, off, value)
+            (t / name).write_bytes(bytes(data))
+        # No section table: e_shoff, e_shnum and e_shstrndx zeroed, as UPX leaves them.
+        patched("nosections", plain, (0x28, "Q", 0), (0x3C, "H", 0), (0x3E, "H", 0))
+        phoff, (phentsize, phnum) = struct.unpack_from("<Q", plain, 0x20)[0], struct.unpack_from("<HH", plain, 0x36)
+        loads = [h for h in range(phoff, phoff + phnum * phentsize, phentsize) if struct.unpack_from("<I", plain, h)[0] == 1]
+        text = next(h for h in loads if struct.unpack_from("<I", plain, h + 4)[0] & 1)
+        flags, filesz = struct.unpack_from("<I", plain, text + 4)[0], struct.unpack_from("<Q", plain, text + 32)[0]
+        # Its code segment made writable too, or larger in memory than in the file.
+        patched("wx", plain, (text + 4, "I", flags | 2))
+        patched("grows", plain, (text + 40, "Q", filesz + 0x10000))
+        # Program headers past the end of the file.
+        patched("badheaders", plain, (0x20, "Q", len(plain) + 4096))
+        cls.got = sweep.sweep({"/" + n: str(t / n) for n in ("plain", "dynamic", "nosections", "wx", "grows",
+                                                             "badheaders")})
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_packed_files_are_flagged(self):
+        # Headers that do not parse are flagged in their own right, whatever objdump makes of the file
+        # (Security R1 on #6382), and objdump leaves this one unread too.
+        self.assertEqual(self.got["packed"], {"/nosections": "no section table",
+                                              "/wx": "a writable and executable segment",
+                                              "/grows": "executable memory past its file bytes",
+                                              "/badheaders": "headers that do not parse"})
+        self.assertIn("/badheaders", self.got["unread"])
+        self.assertNotIn("/plain", self.got["unread"])
+        self.assertEqual({sweep.packed(b"\x7fELF"), sweep.packed(b"\x7fELF\x03\x01" + bytes(60))},
+                         {"headers that do not parse"})
+
+    def test_packed_files_fail_the_step(self):
+        errs = sweep.problems({"t": self.got})
+        for p, why in self.got["packed"].items():
+            self.assertIn("t: %s is packed (%s): its code cannot be read for imports, lookups or carried copies"
+                          % (p, why), errs)
+        self.assertIn("t: objdump could not read /badheaders", errs)
+
+    def test_summary_names_them(self):
+        self.assertIn("  packed /wx: a writable and executable segment", sweep.summary({"t": self.got}))
+
+
+# Security blocker on #6382: GNU ld merges a string literal into the tail of a longer one, so a file that
+# looks "glob" up and also holds "safe_glob" stores no "glob" with a NUL before it. Built with -O2 as
+# distribution packages are.
+MERGED_LOOKUP = ('#include <stdio.h>\n#include <dlfcn.h>\n'
+                 'int main(void) { puts("safe_glob"); return dlsym(RTLD_DEFAULT, "glob") != 0; }\n')
+MERGED_WRAPPED = 'int f(const char *);\nint puts(const char *);\nint main(void) { puts("safe_glob"); return f("glob"); }\n'
+LIB_WRAPS = '#include <dlfcn.h>\nint f(const char *n) { return dlsym(RTLD_DEFAULT, n) != 0; }\n'
+MERGED_MARK = ('int puts(const char *);\n'
+               'int main(void) { puts("my_glob_in_dir"); return puts("glob_in_dir"); }\n')
+
+
+@NEEDS_CC
+class TailMergeTest(unittest.TestCase):
+    """A group name or a glibc mark that ends a stored string counts, as a merged literal stores it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(cls.tmp.name)
+        lib = t / "usr/lib"
+        lib.mkdir(parents=True)
+        (t / "usr/bin").mkdir()
+        built(MERGED_LOOKUP, t / "usr/bin/merged", "-O2", "-ldl")
+        built(LIB_WRAPS, lib / "libwraps.so.1", "-O2", "-shared", "-fPIC", "-Wl,-soname,libwraps.so.1", "-ldl")
+        built(MERGED_WRAPPED, t / "usr/bin/mwrapped", "-O2", "-L" + str(lib), "-l:libwraps.so.1")
+        built(MERGED_MARK, t / "usr/bin/mmark", "-O2")
+        cls.bytes = {n: (t / "usr/bin" / n).read_bytes() for n in ("merged", "mwrapped", "mmark")}
+        cls.got = sweep.run_tree(str(t))["tree"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_linker_merged_them(self):
+        # The premise: each name is stored only as the tail of the longer string.
+        for n, held in (("merged", b"glob"), ("mwrapped", b"glob"), ("mmark", b"glob_in_dir")):
+            with self.subTest(n=n):
+                self.assertNotIn(b"\0" + held + b"\0", self.bytes[n])
+                self.assertIn(held + b"\0", self.bytes[n])
+
+    def test_merged_names_and_marks_count(self):
+        self.assertEqual(self.got["lookups"]["/usr/bin/merged"], ["glob"])
+        self.assertEqual(self.got["lookups"]["/usr/bin/mwrapped"], ["glob"])
+        self.assertEqual(self.got["carries"]["/usr/bin/mmark"], ["glob"])
+
+    def test_re_names_are_glibcs(self):
+        """RE_NAMES, the bounded form of the group's re_\\w+ for string tails, is every re_* name the host's
+        libc exports."""
+        out = subprocess.run(["objdump", "-T", host_libc()], capture_output=True, text=True, check=True).stdout
+        exported = {line.split()[-1] for line in out.splitlines() if re.search(r"\sGLIBC_[\d.]+\)?\s+re_\w+$", line)}
+        self.assertEqual(exported, set(sweep.RE_NAMES))
+        self.assertEqual([m.group() for m in sweep.LOOKUP.finditer(b"\0store_value\0x_re_search_2\0")],
+                         [b"re_search_2"])
+
+
+@NEEDS_CC
+class GlibcIdentityTest(unittest.TestCase):
+    """Security R2 on #6382: only libc.so.6 at the path Debian installs it is a glibc; a file elsewhere
+    with that SONAME is read as any other file, so its marks are a carried copy."""
+
+    def test_a_libc_so_6_elsewhere_is_a_carried_copy(self):
+        with tempfile.TemporaryDirectory() as t:
+            tree = pathlib.Path(t)
+            for d in ("usr/lib/x86_64-linux-gnu", "usr/lib/agentos/images/g/usr/lib/x86_64-linux-gnu",
+                      "usr/lib/other"):
+                (tree / d).mkdir(parents=True)
+                shutil.copy(host_libc(), tree / d / "libc.so.6")
+            got = sweep.run_tree(str(tree))["tree"]
+        self.assertEqual(set(got["glibc"]), {"/usr/lib/x86_64-linux-gnu/libc.so.6",
+                                             "/usr/lib/agentos/images/g/usr/lib/x86_64-linux-gnu/libc.so.6"})
+        self.assertEqual(got["carries"], {"/usr/lib/other/libc.so.6": ["glob", "regcomp", "vfwscanf"]})
+
+
+@NEEDS_CC
+class UnresolvedTest(unittest.TestCase):
+    """Security R4 on #6382: a NEEDED name no file or link of the place answers to is named in the summary
+    and fails the step unless a pinned [unresolved] entry accepts the file (LinkTest has the links)."""
+
+    def test_an_unresolved_needed_is_named(self):
+        with tempfile.TemporaryDirectory() as t:
+            tree = pathlib.Path(t)
+            lib = tree / "usr/lib/x86_64-linux-gnu"
+            lib.mkdir(parents=True)
+            shutil.copy(host_libc(), lib / "libc.so.6")
+            shutil.copy(host_ld(), lib / "ld-linux-x86-64.so.2")
+            built(LIB_WRAPS, lib / "libwraps.so.1", "-shared", "-fPIC", "-Wl,-soname,libwraps.so.1", "-ldl")
+            (tree / "usr/bin").mkdir()
+            built(MERGED_WRAPPED, tree / "usr/bin/w", "-L" + str(lib), "-l:libwraps.so.1")
+            got = sweep.run_tree(str(tree))["tree"]
+            self.assertEqual(got["unresolved"], {})
+            self.assertEqual(got["through"]["/usr/bin/w"], {"/usr/lib/x86_64-linux-gnu/libwraps.so.1": ["dlsym"]})
+            # The wrapper gone: what it would look up is not read, and the summary names it.
+            (lib / "libwraps.so.1").unlink()
+            got = sweep.run_tree(str(tree))["tree"]
+        self.assertEqual(got["unresolved"], {"/usr/bin/w": ["libwraps.so.1"]})
+        self.assertIn("  unresolved /usr/bin/w: libwraps.so.1", sweep.summary({"t": got}))
+        # It fails the step until a pinned [unresolved] entry accepts w's bytes (Security on #6382).
+        sha = got["sha256"]["/usr/bin/w"]
+        places = {"t": got}
+        self.assertEqual(sweep.unresolved_refusals(places, []), [
+            "t: /usr/bin/w needs libwraps.so.1, which no file or link there answers to, so what it would import "
+            "through it is not read; find why it never loads there, then add the entry, with that reason, to "
+            "import_sweep.allow [unresolved]: /usr/bin/w sha256=" + sha])
+        self.assertEqual(sweep.unresolved_refusals(places, [sweep.Entry("/usr/bin/*", False, (sha,))]), [])
+        self.assertEqual(sweep.unresolved_refusals(places, [sweep.Entry("/usr/bin/w", False, ("cd" * 32,))]), [
+            "t: /usr/bin/w needs libwraps.so.1 and holds other bytes than import_sweep.allow [unresolved] /usr/bin/w "
+            "pins; review it again, then pin them: /usr/bin/w sha256=" + sha,
+            "import_sweep.allow: [unresolved] /usr/bin/w pins sha256=%s, which no file it matches holds; remove it"
+            % ("cd" * 32)])
+        self.assertEqual(sweep.unresolved_refusals(places, [sweep.Entry("/usr/bin/w", False, (sha,)),
+                                                            sweep.Entry("/usr/bin/gone", False, (sha,))]), [
+            "import_sweep.allow: [unresolved] /usr/bin/gone matches no file with an unresolved NEEDED name; "
+            "remove it"])
+
+    def test_the_section_parses(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            a.write_text("[unresolved]\n# why\n/usr/lib/x.node%s\n" % PIN)
+            self.assertEqual(sweep.read_allow(a)[4], [E("/usr/lib/x.node")])
+            for body, want in (("[unresolved]\nvia /usr/lib/x.node\n", "is not an entry"),
+                               ("[unresolved]\n/usr/lib/x.node\n", "pins no SHA-256"),
+                               ("[unresolved]\n[unresolved]\n", "[unresolved] is given again")):
+                a.write_text(body)
+                with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
+                    sweep.read_allow(a)
+                self.assertIn(want, str(cm.exception))
+
+
+LIB_FWD = '#include <dlfcn.h>\nvoid *fwd(const char *n) { return dlsym(RTLD_DEFAULT, n); }\n'
+CALLS_FWD = 'void *fwd(const char *);\nint main(void) { return fwd("glob") == 0; }\n'
+
+
+@NEEDS_CC
+class LinkTest(unittest.TestCase):
+    """Security on #6382: a NEEDED name the loader resolves through a symbolic link (a library with no
+    SONAME, named by a link) answers to the file the link names, so a dlsym wrapper reached that way is a
+    lookup source and the library is in the file's closure. The Security repro, built with gcc -O2."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = cls.t = pathlib.Path(cls.tmp.name)
+        lib = t / "usr/lib/x86_64-linux-gnu"
+        lib.mkdir(parents=True)
+        (t / "usr/bin").mkdir()
+        built(LIB_FWD, lib / "libw-real.so", "-O2", "-shared", "-fPIC", "-ldl")
+        os.symlink("libw-real.so", lib / "libw.so")
+        built(CALLS_FWD, t / "usr/bin/m", "-O2", "-L" + str(lib), "-lw")
+        cls.lib = lib
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    REAL = "/usr/lib/x86_64-linux-gnu/libw-real.so"
+
+    def test_a_library_named_by_a_link_is_resolved(self):
+        self.assertEqual(sweep.read_elf(self.t / "usr/bin/m")[1:3], (["libw.so", "libc.so.6"], None))
+        got = sweep.run_tree(str(self.t))["tree"]
+        self.assertEqual(got["lookups"], {"/usr/bin/m": ["glob"]})
+        self.assertEqual(got["through"], {"/usr/bin/m": {self.REAL: ["dlsym"]}})
+        self.assertEqual(got["unresolved"]["/usr/bin/m"], ["libc.so.6"])
+        # Without the link the name is unresolved, and unresolved_refusals fails it.
+        without = sweep.sweep(sweep.tree_files(str(self.t)))
+        self.assertEqual(without["unresolved"]["/usr/bin/m"], ["libc.so.6", "libw.so"])
+        self.assertEqual(without["lookups"], {})
+
+    def test_links_through_directories_and_absolute_targets(self):
+        # /lib -> usr/lib (merged /usr), and an absolute target: both resolve within the place.
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            shutil.copytree(self.t / "usr", t / "usr", symlinks=True)
+            os.symlink("usr/lib", t / "lib")
+            (t / "usr/lib/x86_64-linux-gnu/libw.so").unlink()
+            os.symlink("/lib/x86_64-linux-gnu/libw-real.so", t / "usr/lib/x86_64-linux-gnu/libw.so")
+            got = sweep.run_tree(str(t))["tree"]
+        self.assertEqual(got["through"], {"/usr/bin/m": {self.REAL: ["dlsym"]}})
+
+    def test_a_split_usr_tree_reads_the_links_under_usr(self):
+        # run_build's path: the root and /usr come from two directories, and /usr's links count too.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as d:
+            usr = pathlib.Path(d) / "usr"
+            shutil.copytree(self.t / "usr", usr, symlinks=True)
+            got = sweep.run_tree(root, str(usr))["tree"]
+        self.assertEqual(got["through"], {"/usr/bin/m": {self.REAL: ["dlsym"]}})
+        self.assertEqual(got["lookups"], {"/usr/bin/m": ["glob"]})
+
+    def test_a_name_answers_only_in_its_own_root(self):
+        # The loader searches the process's own root: a guest's library is no core file's, nor the reverse.
+        g = "/usr/lib/agentos/images/g"
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            shutil.copytree(self.t / "usr/lib", t / g.strip("/") / "usr/lib", symlinks=True)
+            (t / "usr/bin").mkdir(parents=True)
+            shutil.copy(self.t / "usr/bin/m", t / "usr/bin/m")
+            got = sweep.run_tree(str(t))["tree"]
+            self.assertEqual((got["lookups"], got["through"]), ({}, {}))
+            self.assertEqual(got["unresolved"]["/usr/bin/m"], ["libc.so.6", "libw.so"])
+            (t / g.strip("/") / "usr/bin").mkdir()
+            shutil.copy(self.t / "usr/bin/m", t / g.strip("/") / "usr/bin/m")
+            got = sweep.run_tree(str(t))["tree"]
+        self.assertEqual(got["through"], {g + "/usr/bin/m": {g + self.REAL: ["dlsym"]}})
+        self.assertEqual(got["unresolved"]["/usr/bin/m"], ["libc.so.6", "libw.so"])
+        self.assertEqual(sweep.root_of(g + "/usr/bin/m"), g)
+        self.assertEqual(sweep.root_of("/usr/lib/agentos/images/g"), "")
+
+    def test_a_dlsym_forwarding_export_is_a_lookup_function(self):
+        # libcrypto's DSO_bind_func passes its caller's name to dlsym: importing it is a lookup, under any
+        # version or none (a library of the test's own here), as importing dlsym is.
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            lib = t / "usr/lib"
+            lib.mkdir(parents=True)
+            (t / "usr/bin").mkdir()
+            built("void *DSO_bind_func(void *d, const char *n) { return (void *)n; }\n", lib / "libdso.so.1",
+                  "-shared", "-fPIC", "-Wl,-soname,libdso.so.1")
+            built('void *DSO_bind_func(void *, const char *);\n'
+                  'int main(void) { return DSO_bind_func(0, "glob") == 0; }\n', t / "usr/bin/f",
+                  "-L" + str(lib), "-l:libdso.so.1")
+            self.assertEqual(sweep.read_elf(t / "usr/bin/f")[4], {"DSO_bind_func"})
+            got = sweep.run_tree(str(t))["tree"]
+        self.assertEqual(got["lookups"], {"/usr/bin/f": ["glob"]})
+        self.assertEqual(got["through"], {"/usr/bin/f": {"/usr/bin/f": ["DSO_bind_func"]}})
+        for line, name in (("0000000000000000      DF *UND*\t0000000000000000 (OPENSSL_3.0.0) DSO_bind_func",
+                            "DSO_bind_func"),
+                           ("0000000000000000      DF *UND*\t0000000000000000  Base        dlsym", "dlsym"),
+                           ("0000000000000000      DF *UND*\t0000000000000000              dlvsym", "dlvsym")):
+            self.assertEqual(sweep.UND_ANY.search(line).group(1), name)
+
+    def test_resolve(self):
+        links = {"/lib": "usr/lib", "/usr/lib/a.so": "../lib/b.so", "/usr/lib/loop": "loop",
+                 "/usr/lib/agentos/images/g/usr/lib/c.so": "/usr/lib/d.so",
+                 "/usr/lib/agentos/images/g/usr/lib/e.so": "../../../../../../../../x.so"}
+        self.assertEqual(sweep.resolve("/lib/a.so", links), "/usr/lib/b.so")
+        self.assertIsNone(sweep.resolve("/usr/lib/loop", links))
+        # A guest's absolute link and its ".." stay in the guest root, as its processes see it.
+        self.assertEqual(sweep.resolve("/usr/lib/agentos/images/g/usr/lib/c.so", links),
+                         "/usr/lib/agentos/images/g/usr/lib/d.so")
+        self.assertEqual(sweep.resolve("/usr/lib/agentos/images/g/usr/lib/e.so", links),
+                         "/usr/lib/agentos/images/g/x.so")
+
+    def test_initrd_links_and_hard_links_resolve(self):
+        real = (self.lib / "libw-real.so").read_bytes()
+        m = (self.t / "usr/bin/m").read_bytes()
+        cases = {
+            "symbolic": [("usr/lib/libw-real.so", 0o100755, real), ("usr/lib/libw.so", 0o120777, b"libw-real.so")],
+            # Hard links: the body is on one name only (newc), the other name answers to the same file.
+            "hard": [("usr/lib/libw.so", 0o100755, b"", 7, 2), ("usr/lib/libw-real.so", 0o100755, real, 7, 2)],
+        }
+        for case, members in cases.items():
+            data = newc(members + [("usr/bin/m", 0o100755, m)])
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as d:
+                p = pathlib.Path(d) / "initrd"
+                p.write_bytes(data)
+                with tempfile.TemporaryDirectory() as scratch:
+                    got = sweep.initrd_place(p, scratch)
+                self.assertEqual(got["through"], {"/usr/bin/m": {"/usr/lib/libw-real.so": ["dlsym"]}})
+                self.assertEqual(set(got["unresolved"]), {"/usr/bin/m", "/usr/lib/libw-real.so"})
+
+
+@NEEDS_CC
+class WrapperTest(unittest.TestCase):
+    """A [wrapper] entry names a library, pinned, whose dlsym calls take only its own names: a dependent's
+    string is no lookup through it. The file's own dlsym import still counts."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(cls.tmp.name)
+        lib = t / "usr/lib"
+        lib.mkdir(parents=True)
+        (t / "usr/bin").mkdir()
+        built(LIB_WRAPS, lib / "libwraps.so.1", "-shared", "-fPIC", "-Wl,-soname,libwraps.so.1", "-ldl")
+        built(LIB_VLOOKS_UP, lib / "libvlook.so.1", "-shared", "-fPIC", "-Wl,-soname,libvlook.so.1", "-ldl")
+        built(MERGED_WRAPPED, t / "usr/bin/w", "-L" + str(lib), "-l:libwraps.so.1")
+        built(WRAPPED_V.replace('"advance"', '"glob"'), t / "usr/bin/wv", "-L" + str(lib), "-l:libvlook.so.1")
+        built(MERGED_LOOKUP, t / "usr/bin/own", "-O2", "-L" + str(lib), "-l:libwraps.so.1", "-ldl",
+              "-Wl,--no-as-needed")
+        cls.got = sweep.run_tree(str(t))
+        cls.sha = cls.got["tree"]["sha256"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def wrap(self, *libs):
+        return [sweep.Entry(g, False, (self.sha.get(g, "cd" * 32),)) for g in libs]
+
+    def test_a_reviewed_wrapper_drops_its_dependents_lookups(self):
+        lookups = self.got["tree"]["lookups"]
+        self.assertEqual((lookups["/usr/bin/w"], lookups["/usr/bin/own"], lookups["/usr/bin/wv"]),
+                         (["glob"], ["glob"], ["glob", "step"]))
+        got, errs = sweep.unwrapped(self.got, self.wrap("/usr/lib/libwraps.so.1", "/usr/lib/libvlook.so.1"))
+        self.assertEqual(errs, [])
+        # w looked up only through libwraps; own imports dlsym itself; wv's names go with libvlook's dlvsym.
+        self.assertEqual({p: n for p, n in got["tree"]["lookups"].items() if p.startswith("/usr/bin/")},
+                         {"/usr/bin/own": ["glob"]})
+        self.assertEqual(self.got["tree"]["lookups"]["/usr/bin/w"], ["glob"])
+
+    def test_a_wrapper_holding_other_bytes_accepts_nothing(self):
+        stale = [sweep.Entry("/usr/lib/libwraps.so.1", False, ("cd" * 32,))]
+        got, errs = sweep.unwrapped(self.got, stale)
+        self.assertEqual(got["tree"]["lookups"]["/usr/bin/w"], ["glob"])
+        self.assertIn("tree: /usr/lib/libwraps.so.1 holds other bytes than import_sweep.allow [wrapper] "
+                      "/usr/lib/libwraps.so.1 pins; review its dlsym calls again, then pin them: "
+                      "/usr/lib/libwraps.so.1 sha256=" + self.sha["/usr/lib/libwraps.so.1"], errs)
+        self.assertIn("import_sweep.allow: [wrapper] /usr/lib/libwraps.so.1 pins sha256=%s, which no library "
+                      "it matches holds; remove it" % ("cd" * 32), errs)
+
+    def test_an_unused_wrapper_fails(self):
+        _, errs = sweep.unwrapped(self.got, self.wrap("/usr/lib/libgone.so.1"))
+        self.assertEqual(errs, ["import_sweep.allow: [wrapper] /usr/lib/libgone.so.1 matches no library a "
+                                "lookup goes through; remove it"])
+
+    def test_the_section_parses(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            a.write_text("[wrapper]\n/usr/lib/libwraps.so.*%s\n" % PIN)
+            self.assertEqual(sweep.read_allow(a)[3], [E("/usr/lib/libwraps.so.*")])
+            for body, want in (("[wrapper]\nvia /usr/lib/libw.so\n", "is not an entry"),
+                               ("[wrapper]\n/usr/lib/libw.so\n", "pins no SHA-256")):
+                a.write_text(body)
+                with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
+                    sweep.read_allow(a)
+                self.assertIn(want, str(cm.exception))
+
+
+# #6671: a stand-in libssl defining the QUIC entry points under OPENSSL_3.2.0 (as 3.5's does) and itself
+# importing dlsym, and the files using them in each way the sweep counts or does not.
+FAKE_SSL = ("#include <dlfcn.h>\nvoid *BIO_s_datagram(void);\nvoid *BIO_s_connect(void);\n"
+            "void *BIO_new_ssl_connect(void *c) { return BIO_s_connect(); }\n"
+            "void *OSSL_QUIC_client_method(void) { return dlsym(RTLD_DEFAULT, \"x\"); }\n"
+            "void *SSL_set_fd(void) { return BIO_s_datagram(); }\n"
+            "void *OSSL_QUIC_client_thread_method(void) { return 0; }\n"
+            "void *OSSL_QUIC_server_method(void) { return 0; }\n"
+            "void *SSL_new_listener(void *c, unsigned long f) { return c; }\n"
+            "void *TLS_method(void) { return 0; }\n")
+SSL_MAP = ("OPENSSL_3.2.0 { global: OSSL_QUIC_client_method; OSSL_QUIC_client_thread_method; "
+           "OSSL_QUIC_server_method; SSL_new_listener; TLS_method; BIO_new_ssl_connect; local: *; };\n")
+CLIENT = ("void *OSSL_QUIC_client_method(void);\nvoid *BIO_new_dgram(int, int);\n"
+          "int main(void) { return OSSL_QUIC_client_method() != BIO_new_dgram(0, 0); }\n")
+# A stand-in libcrypto defining the datagram BIO constructors, and L3 7157966663's repro: a file making a
+# datagram BIO to ask its peer address, with no QUIC name (-88822).
+DGRAM_CRYPTO = ("void *BIO_s_datagram(void) { return 0; }\nvoid *BIO_new_dgram(int s, int f) { return 0; }\n"
+                "void *BIO_s_connect(void) { return 0; }\nvoid *BIO_new_connect(const char *h) { return 0; }\n"
+                "long BIO_ctrl(void *b, int c, long l, void *p) { return 0; }\n")
+CRYPTO_MAP = ("OPENSSL_3.0.0 { global: BIO_s_datagram; BIO_new_dgram; BIO_s_connect; BIO_new_connect; BIO_ctrl; "
+              "local: *; };\n")
+# L3 7158175373 and Security 7158185323: a connect BIO set to SOCK_DGRAM (BIO_C_SET_SOCK_TYPE 157) makes a
+# datagram BIO and hands it out (BIO_C_GET_DGRAM_BIO 159); the file imports only BIO_new_connect and BIO_ctrl.
+CONN_USER = ("long BIO_ctrl(void *, int, long, void *);\nvoid *BIO_new_connect(const char *);\n"
+             "int main(void) { void *c = BIO_new_connect(\"h:1\"), *d = 0; BIO_ctrl(c, 157, 2, 0);\n"
+             "  BIO_ctrl(c, 159, 0, &d); return BIO_ctrl(d, 87, 0, 0); }\n")
+SSL_CONN_USER = "void *BIO_new_ssl_connect(void *);\nint main(void) { return BIO_new_ssl_connect(0) != 0; }\n"
+DGRAM_USER = ("void *BIO_new_dgram(int, int);\nlong BIO_ctrl(void *, int, long, void *);\n"
+              "int main(void) { return BIO_ctrl(BIO_new_dgram(3, 0), 87, 0, 0); }\n")
+DGRAM_LOOKUP = '#include <dlfcn.h>\nint main(void) { return dlsym(RTLD_DEFAULT, "BIO_s_dgram_pair") != 0; }\n'
+SERVER = ("void *OSSL_QUIC_server_method(void);\nvoid *SSL_new_listener(void *, unsigned long);\n"
+          "int main(void) { return SSL_new_listener(OSSL_QUIC_server_method(), 0) != 0; }\n")
+TLS_ONLY = "void *TLS_method(void);\nint main(void) { return TLS_method() != 0; }\n"
+# An OpenSSL without symbol versions: its importers bind to no version and still count.
+OLD_SSL = "void *OSSL_QUIC_client_thread_method(void) { return 0; }\n"
+THREAD = "void *OSSL_QUIC_client_thread_method(void);\nint main(void) { return OSSL_QUIC_client_thread_method() != 0; }\n"
+QUIC_LOOKUP = ('#include <dlfcn.h>\n'
+               'int main(void) { return dlsym(RTLD_DEFAULT, "OSSL_QUIC_client_method") != 0; }\n')
+# The name as the tail of a longer string, as GNU ld may store it: fail-closed, it counts.
+QUIC_TAIL = ('#include <dlfcn.h>\nconst char *n = "my_SSL_new_listener";\n'
+             'int main(void) { return dlsym(RTLD_DEFAULT, n + 3) != 0; }\n')
+# The name held with no lookup function: nothing can resolve it by that string.
+QUIC_HELD_ONLY = 'const char *n = "OSSL_QUIC_server_method";\nint main(void) { return n[0]; }\n'
+QUIC_ID_RE = re.compile(r"DEBIAN-CVE-2026-(\d+)")
+
+
+@NEEDS_CC
+class QuicImportTest(unittest.TestCase):
+    """#6671: a file importing an OpenSSL QUIC entry point, or importing dlsym or dlvsym and holding one's
+    name, is held to the allow file's [quic] section; libssl, which defines them, is not counted."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(cls.tmp.name)
+        src, cls.tree = t / "src", t / "tree"
+        lib = cls.tree / "usr/lib"
+        for d in (src, lib, cls.tree / "usr/bin"):
+            d.mkdir(parents=True, exist_ok=True)
+
+        def cc(name, code, out, *args):
+            (src / name).write_text(code)
+            subprocess.run(["cc", "-o", str(out), str(src / name), *args], check=True)
+        (src / "ssl.map").write_text(SSL_MAP)
+        (src / "crypto.map").write_text(CRYPTO_MAP)
+        cc("crypto.c", DGRAM_CRYPTO, lib / "libcrypto.so.3", "-shared", "-fPIC", "-Wl,-soname,libcrypto.so.3",
+           "-Wl,--version-script," + str(src / "crypto.map"))
+        cc("ssl.c", FAKE_SSL, lib / "libssl.so.3", "-shared", "-fPIC", "-Wl,-soname,libssl.so.3",
+           "-Wl,--version-script," + str(src / "ssl.map"), "-ldl", "-L" + str(lib), "-l:libcrypto.so.3")
+        cc("oldssl.c", OLD_SSL, lib / "liboldssl.so.1", "-shared", "-fPIC", "-Wl,-soname,liboldssl.so.1")
+        ssl = ("-L" + str(lib), "-l:libssl.so.3", "-l:libcrypto.so.3")
+        cc("client.c", CLIENT, cls.tree / "usr/bin/openssl", *ssl)
+        cc("server.c", SERVER, cls.tree / "usr/bin/quicd", *ssl)
+        cc("tls.c", TLS_ONLY, cls.tree / "usr/bin/tlsonly", *ssl)
+        cc("thread.c", THREAD, cls.tree / "usr/bin/thread", "-L" + str(lib), "-l:liboldssl.so.1")
+        cc("lookup.c", QUIC_LOOKUP, cls.tree / "usr/bin/quiclookup", "-ldl")
+        cc("tail.c", QUIC_TAIL, cls.tree / "usr/bin/quictail", "-ldl")
+        cc("held.c", QUIC_HELD_ONLY, cls.tree / "usr/bin/quicheld")
+        cc("dgram.c", DGRAM_USER, cls.tree / "usr/bin/dgramd", "-L" + str(lib), "-l:libcrypto.so.3")
+        cc("dgramlook.c", DGRAM_LOOKUP, cls.tree / "usr/bin/dgramlook", "-ldl")
+        cc("conn.c", CONN_USER, cls.tree / "usr/bin/connd", "-L" + str(lib), "-l:libcrypto.so.3")
+        cc("sslconn.c", SSL_CONN_USER, cls.tree / "usr/bin/sslconn", *ssl)
+        cls.got = sweep.run_tree(str(cls.tree))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_importers_and_lookups_counted_definers_not(self):
+        got = self.got["tree"]
+        self.assertEqual(got["quic"], {"/usr/bin/openssl": ["OSSL_QUIC_client_method"],
+                                       "/usr/bin/quicd": ["OSSL_QUIC_server_method", "SSL_new_listener"],
+                                       "/usr/bin/quiclookup": ["OSSL_QUIC_client_method"],
+                                       "/usr/bin/quictail": ["SSL_new_listener"],
+                                       "/usr/bin/thread": ["OSSL_QUIC_client_thread_method"]})
+        self.assertEqual(got["unread"], [])
+
+    def test_datagram_bio_makers_counted_libcrypto_not(self):
+        # L3 7157966663: -88822 is reached through any datagram BIO, QUIC or not.
+        self.assertEqual(self.got["tree"]["dgram"], {"/usr/bin/connd": ["BIO_new_connect"],
+                                                     "/usr/bin/dgramd": ["BIO_new_dgram"],
+                                                     "/usr/bin/dgramlook": ["BIO_s_dgram_pair"],
+                                                     "/usr/bin/openssl": ["BIO_new_dgram"],
+                                                     "/usr/bin/sslconn": ["BIO_new_ssl_connect"],
+                                                     "/usr/lib/libssl.so.3": ["BIO_s_connect", "BIO_s_datagram"]})
+        listed = {"quic": ["/usr/bin/openssl", "/usr/bin/quic*", "/usr/bin/thread"],
+                  "dgram": ["/usr/bin/openssl", "/usr/lib/libssl.so.3"]}
+        errs = sweep.openssl_refusals(self.got, listed)
+        self.assertEqual([e.split(": ", 2)[1].split()[0] for e in errs],
+                         ["/usr/bin/connd", "/usr/bin/dgramd", "/usr/bin/dgramlook", "/usr/bin/sslconn"])
+        self.assertEqual(errs[1], "tree: /usr/bin/dgramd imports or looks up OpenSSL's datagram or connect BIO "
+                         "constructors (BIO_new_dgram) and is not in import_sweep.allow [dgram]; the DEBIAN-CVE-2026-88822 "
+                         "records rest on no other file doing so: review what it does with them, update those "
+                         "records, then add the entry: /usr/bin/dgramd")
+        self.assertEqual(sweep.openssl_refusals(self.got, dict(listed, dgram=listed["dgram"] + ["/usr/bin/dgram*", "/usr/bin/*conn*"])),
+                         [])
+
+    def test_only_listed_files_pass_and_unused_entries_fail(self):
+        listed = ["/usr/bin/openssl", "/usr/bin/quic*", "/usr/bin/thread"]
+        quic = {"tree": {"quic": self.got["tree"]["quic"]}}
+        self.assertEqual(sweep.openssl_refusals(quic, {"quic": listed}), [])
+        errs = sweep.openssl_refusals(quic, {"quic": ["/usr/bin/openssl", "/usr/bin/gone"]})
+        self.assertEqual([e.split(": ", 2)[1].split()[0] for e in errs[:-1]],
+                         ["/usr/bin/quicd", "/usr/bin/quiclookup", "/usr/bin/quictail", "/usr/bin/thread"])
+        self.assertEqual(errs[0], "tree: /usr/bin/quicd imports or looks up OpenSSL's QUIC entry points "
+                         "(OSSL_QUIC_server_method SSL_new_listener) and is not in import_sweep.allow [quic]; the "
+                         "openssl QUIC records (%s) rest on no other file doing so: review what it does with them, "
+                         "update those records, then add the entry: /usr/bin/quicd" % sweep.QUIC_RECORDS)
+        unused = ("import_sweep.allow: [quic] %s matches no file importing or looking up OpenSSL's QUIC entry points; "
+                  "each entry is also the control that this scan still reads them, so remove it only once that file "
+                  "has left the image or stopped using them, and otherwise treat the scan as broken")
+        self.assertEqual(errs[-1], unused % "/usr/bin/gone")
+        # The openssl entry is the control: a scan that read no importer fails on it, saying so (L3 item 3).
+        self.assertEqual(sweep.openssl_refusals({"tree": {"quic": {}}}, {"quic": ["/usr/bin/openssl"]}),
+                         [unused % "/usr/bin/openssl"])
+
+    def test_an_initrd_is_held_too(self):
+        places = {"tree": {"quic": {"/usr/bin/openssl": ["OSSL_QUIC_client_method"]}},
+                  "initrd:main": {"quic": {"/usr/bin/x": ["SSL_new_listener"]}}}
+        errs = sweep.openssl_refusals(places, {"quic": ["/usr/bin/openssl"]})
+        self.assertEqual(len(errs), 1)
+        self.assertTrue(errs[0].startswith("initrd:main: /usr/bin/x imports or looks up"), errs)
+
+    def test_objdump_failure_on_a_holder_is_unread(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = pathlib.Path(d) / "bad"
+            bad.write_bytes(b"\x7fELF" + b"\xff" * 60 + b"\0OSSL_QUIC_client_method\0")
+            self.assertEqual(sweep.openssl_uses(bad)[1], False)
+            plain = pathlib.Path(d) / "plain"
+            plain.write_bytes(b"\x7fELF" + b"\xff" * 60)
+            self.assertEqual(sweep.openssl_uses(plain), ({}, True))
+
+    def test_summary_and_exit(self):
+        lines = sweep.summary(self.got)
+        self.assertIn("tree quic: 5 files import or look up OpenSSL's QUIC entry points", lines)
+        self.assertIn("  quic /usr/bin/quicd: OSSL_QUIC_server_method SSL_new_listener", lines)
+        self.assertIn("tree dgram: 6 files import or look up OpenSSL's datagram or connect BIO constructors", lines)
+        base = dict(imports={"/usr/bin/bash": ["regcomp"]}, via={}, scanned=3, cipher={"/l": {"EVP_CIPHER_fetch": 1}},
+                    sha256={"/l": "0f" * 32, "/usr/bin/bash": D, "/usr/sbin/ldconfig": D},
+                    carries={"/usr/sbin/ldconfig": ["glob"]},
+                    glibc={"/usr/lib/x86_64-linux-gnu/libc.so.6": ["glob", "regcomp", "vfwscanf"]})
+        with tempfile.TemporaryDirectory() as d:
+            j, a = pathlib.Path(d) / "p.json", pathlib.Path(d) / "allow"
+            a.write_text("/usr/bin/bash%s\n[glob]\n/usr/sbin/ldconfig%s\n[cipher]\n/l *\n[quic]\n/usr/bin/openssl  # CLI\n"
+                         "[dgram]\n/usr/bin/openssl\n" % (PIN, PIN))
+            dgram = {"/usr/bin/openssl": ["BIO_new_dgram"]}
+            for quic, dg, want in (({"/usr/bin/openssl": ["OSSL_QUIC_client_method"]}, dgram, 0),
+                                   ({"/usr/bin/openssl": ["OSSL_QUIC_client_method"], "/usr/bin/d": ["SSL_new_listener"]},
+                                    dgram, 1),
+                                   ({}, dgram, 1),
+                                   ({"/usr/bin/openssl": ["OSSL_QUIC_client_method"]},
+                                    dict(dgram, **{"/usr/bin/d": ["BIO_new_dgram"]}), 1)):
+                j.write_text(__import__("json").dumps({"tree": dict(base, quic=quic, dgram=dg)}))
+                with self.subTest(quic=quic), contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(sweep.main(["--summary", str(j), str(a)]), want)
+
+
+class QuicAllowTest(unittest.TestCase):
+    """#6671: the [quic] section's form, the shipped entry, and the records citing it."""
+
+    def test_entries_parse_and_bad_lines_name_the_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            a.write_text("/usr/bin/bash%s\n[quic]\n# why\n/usr/bin/openssl  # the CLI\n/usr/lib/x/*\n" % PIN)
+            self.assertEqual(sweep.read_allow(a)[5], {"quic": ["/usr/bin/openssl", "/usr/lib/x/*"], "dgram": []})
+            a.write_text("[dgram]\n/usr/bin/openssl\n[quic]\n/usr/bin/openssl\n")
+            self.assertEqual(sweep.read_allow(a)[5], {"quic": ["/usr/bin/openssl"], "dgram": ["/usr/bin/openssl"]})
+            for body, want in (("[quic]\n/a /b\n", ":2: /a /b is not an entry; a [quic] entry is one GLOB"),
+                               ("[dgram]\n/a /b\n", ":2: /a /b is not an entry; a [dgram] entry is one GLOB"),
+                               ("[dgram]\n[dgram]\n", ":2: [dgram] is given again"),
+                               ("[quic]\nvia /a\n", ":2: via /a is not an entry"),
+                               ("[quic]\n/a\n/a\n", ":3: /a is given again"),
+                               ("[quic]\n[quic]\n", ":2: [quic] is given again")):
+                a.write_text(body)
+                with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
+                    sweep.read_allow(a)
+                self.assertIn(want, str(cm.exception))
+
+    def test_shipped_entries(self):
+        self.assertEqual(sweep.read_allow(sweep.ALLOW)[5], {"quic": ["/usr/bin/openssl"],
+                                                            "dgram": ["/usr/bin/openssl",
+                                                                      "/usr/lib/x86_64-linux-gnu/libssl.so.3"]})
+
+    def test_quic_records_cite_the_sweep(self):
+        """Every openssl record of the image or its initrd whose advisory is in OpenSSL's QUIC stack names this
+        check, and QUIC_RECORDS names each of them."""
+        doc = __import__("json").loads((ROOT / "assurance/vulncheck.json").read_text())
+        named = set(QUIC_ID_RE.findall(sweep.QUIC_RECORDS)) | set(re.findall(r"-(\d+)", sweep.QUIC_RECORDS))
+        quic = [r for r in doc["accepted"] if r.get("package") == "openssl"
+                and r.get("where") in ("image", "image/initrd")
+                and ("QUIC" in r["why"] or QUIC_ID_RE.match(r["id"]).group(1) in named)]
+        # The four on main as of #6671 (-84785 lands with #6669), in both places.
+        for n in ("88822", "95691", "124709", "107494"):
+            self.assertEqual({r["where"] for r in quic if r["id"] == "DEBIAN-CVE-2026-" + n},
+                             {"image", "image/initrd"}, n)
+        for r in quic:
+            with self.subTest(id=r["id"], where=r["where"]):
+                self.assertRegex(r["why"], r"image/import_sweep\.py \[(quic|dgram)\]")
+                self.assertIn("[quic]", r["why"])
+                # L3 7157966663: -88822's flaw is the datagram BIO's, reached with no QUIC object too.
+                if r["id"] == "DEBIAN-CVE-2026-88822":
+                    self.assertIn("[dgram]", r["why"])
+                self.assertIn(QUIC_ID_RE.match(r["id"]).group(1), named)
+
+
+# #6545: stand-ins for libexpat1's two libraries, a dbus-daemon linking the UTF-8 one, and users of the wide one.
+EXPAT_LIB = "int XML_ParserCreate(void) { return 1; }\n"
+USES_EXPAT = "int XML_ParserCreate(void);\nint main(void) { return XML_ParserCreate(); }\n"
+DLOPENS_EXPATW = ('#include <dlfcn.h>\nint main(void) { return dlopen("libexpatw.so.1", RTLD_NOW) != 0; }\n')
+# Rust and Go keep string literals unterminated and build the C string at run time (CString::new,
+# C.CString), so the name is followed by the next literal's bytes, not a NUL (L3 on #6733). POOL is the
+# literal pool as rustc ("\\x15me") and the Go linker ("no ") lay it out; main copies the 14 bytes out.
+UNTERMINATED_EXPATW = ('#include <dlfcn.h>\n#include <string.h>\nstatic const char pool[] = "libexpatw.so.1%s";\n'
+                       'int main(void) { char n[15]; memcpy(n, pool, 14); n[14] = 0;'
+                       ' return dlopen(n, RTLD_NOW) != 0; }\n')
+
+
+@NEEDS_CC
+class ExpatWideTest(unittest.TestCase):
+    """VULN-expatw-link-check (#6545): the DEBIAN-CVE-2026-134703 record accepts expat on the grounds that
+    nothing loads its wide build, libexpatw.so.1; the sweep reads that from the tree. A file whose NEEDED
+    closure holds the wide build, or that names it in a string (dlopen), fails --summary; the same tree with
+    the UTF-8 libexpat.so.1 only passes, and the wide library installed but unused passes too."""
+
+    WHY = ("loads expat's wide build (%s), which runs the UTF-16 converters DEBIAN-CVE-2026-134703 (#6542) "
+           "accepts as unreached; drop that user or the library, or read its reach and amend the record")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = cls.t = pathlib.Path(cls.tmp.name)
+        lib = cls.lib = t / "usr/lib/x86_64-linux-gnu"
+        lib.mkdir(parents=True)
+        (t / "usr/bin").mkdir()
+        # As Debian installs libexpat1: each file carries the version, the SONAME is a link.
+        for name in ("libexpat", "libexpatw"):
+            built(EXPAT_LIB, lib / (name + ".so.1.9.0"), "-shared", "-fPIC", "-Wl,-soname,%s.so.1" % name)
+            os.symlink(name + ".so.1.9.0", lib / (name + ".so.1"))
+        built(USES_EXPAT, t / "usr/bin/dbus-daemon", "-L" + str(lib), "-l:libexpat.so.1")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def errs(self, got):
+        return [e for e in sweep.problems({"tree": got}) if "wide build" in e]
+
+    def test_the_utf8_build_only_passes(self):
+        got = sweep.run_tree(str(self.t))["tree"]
+        self.assertEqual(got["expatw"], {})
+        self.assertEqual(self.errs(got), [])
+        self.assertFalse([line for line in sweep.summary({"tree": got}) if "expatw" in line])
+
+    def test_a_wide_user_fails(self):
+        W = "/usr/lib/x86_64-linux-gnu/libexpatw.so.1.9.0"
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d) / "t"
+            shutil.copytree(self.t, t, symlinks=True)
+            lib = t / "usr/lib/x86_64-linux-gnu"
+            # A direct NEEDED, a NEEDED through a library, and a dlopen by name.
+            built(USES_EXPAT, t / "usr/bin/direct", "-L" + str(lib), "-l:libexpatw.so.1")
+            built(USES_EXPAT.replace("main", "f"), lib / "libmid.so.1", "-shared", "-fPIC",
+                  "-Wl,-soname,libmid.so.1", "-L" + str(lib), "-l:libexpatw.so.1")
+            built("int f(void);\nint main(void) { return f(); }\n", t / "usr/bin/indirect",
+                  "-L" + str(lib), "-l:libmid.so.1")
+            built(DLOPENS_EXPATW, t / "usr/bin/opener", "-ldl")
+            got = sweep.run_tree(str(t))["tree"]
+        want = {"/usr/bin/direct": [W, "libexpatw.so.1"],
+                "/usr/bin/indirect": [W, "libexpatw.so.1"],
+                "/usr/lib/x86_64-linux-gnu/libmid.so.1": [W, "libexpatw.so.1"],
+                "/usr/bin/opener": ["libexpatw.so.1"]}
+        self.assertEqual(got["expatw"], want)
+        self.assertEqual(self.errs(got), ["tree: %s %s" % (p, self.WHY % " ".join(w)) for p, w in sorted(want.items())])
+        self.assertIn("  expatw /usr/bin/opener: libexpatw.so.1", sweep.summary({"tree": got}))
+
+    def test_an_unterminated_name_fails(self):
+        # The Rust and Go layouts of a dlopen("libexpatw.so.1") argument: no NUL after the name.
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d) / "t"
+            shutil.copytree(self.t, t, symlinks=True)
+            built(UNTERMINATED_EXPATW % "\\x15me", t / "usr/bin/rusty", "-ldl")
+            built(UNTERMINATED_EXPATW % "no ", t / "usr/bin/gopher", "-ldl")
+            for f in ("rusty", "gopher"):
+                data = (t / "usr/bin" / f).read_bytes()
+                self.assertNotIn(b"libexpatw.so.1\0", data)
+            got = sweep.run_tree(str(t))["tree"]
+        want = {"/usr/bin/gopher": ["libexpatw.so.1"], "/usr/bin/rusty": ["libexpatw.so.1"]}
+        self.assertEqual(got["expatw"], want)
+        self.assertEqual(self.errs(got), ["tree: %s %s" % (p, self.WHY % " ".join(w)) for p, w in sorted(want.items())])
+
+    def test_a_library_is_read_by_soname(self):
+        # x was linked against a stub libfoo.so (NEEDED libfoo.so); the file now there is the wide build
+        # under another file name, told apart only by its SONAME (the SONAME arm of is_wide; Security on #6733).
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            lib = t / "usr/lib"
+            lib.mkdir(parents=True)
+            (t / "usr/bin").mkdir()
+            built(EXPAT_LIB, lib / "libfoo.so", "-shared", "-fPIC")
+            built(USES_EXPAT, t / "usr/bin/x", "-L" + str(lib), "-lfoo")
+            (lib / "libfoo.so").unlink()
+            built(EXPAT_LIB, lib / "libfoo-real.so", "-shared", "-fPIC", "-Wl,-soname,libexpatw.so.1")
+            os.symlink("libfoo-real.so", lib / "libfoo.so")
+            got = sweep.run_tree(str(t))["tree"]
+        self.assertEqual(got["expatw"], {"/usr/bin/x": ["/usr/lib/libfoo-real.so"]})
+
+    def test_an_alias_without_soname_is_read_by_file_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            lib = t / "usr/lib"
+            lib.mkdir(parents=True)
+            (t / "usr/bin").mkdir()
+            # No SONAME: the NEEDED name is the link's, and only the file it names says it is the wide build.
+            built(EXPAT_LIB, lib / "libexpatw.so.1", "-shared", "-fPIC")
+            os.symlink("libexpatw.so.1", lib / "libx.so")
+            built(USES_EXPAT, t / "usr/bin/x", "-L" + str(lib), "-lx")
+            got = sweep.run_tree(str(t))["tree"]
+        self.assertEqual(got["expatw"], {"/usr/bin/x": ["/usr/lib/libexpatw.so.1"]})

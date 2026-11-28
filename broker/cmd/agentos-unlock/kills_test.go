@@ -43,7 +43,7 @@ import (
 func plainStore(t *testing.T) (*seal.Store, []byte) {
 	t.Helper()
 	rk := bytes.Repeat([]byte{7}, seal.RecoveryLen)
-	st, err := seal.Create(filepath.Join(t.TempDir(), "store"), seal.Recovery{Key: rk})
+	st, err := seal.Create(filepath.Join(t.TempDir(), "store"), seal.Recovery{Key: secret.Hide(rk)})
 	must(t, err)
 	t.Cleanup(st.Close)
 	return st, rk
@@ -203,11 +203,11 @@ func TestLockStoreHoldsTheLock(t *testing.T) {
 func lostStore(t *testing.T, dir string) (*seal.Store, []byte, ed25519.PrivateKey) {
 	t.Helper()
 	rk := bytes.Repeat([]byte{7}, seal.RecoveryLen)
-	st, err := seal.Create(filepath.Join(dir, "store"), seal.Recovery{Key: rk})
+	st, err := seal.Create(filepath.Join(dir, "store"), seal.Recovery{Key: secret.Hide(rk)})
 	must(t, err)
 	t.Cleanup(st.Close)
 	must(t, st.Put(handoff.RecipientEntry, recipientEntry(t, rk)))
-	_, err = st.AddSlot(seal.Passphrase{Phrase: []byte("correct horse battery staple")})
+	_, err = st.AddSlot(seal.Passphrase{Phrase: secret.Hide([]byte("correct horse battery staple"))})
 	must(t, err)
 	head, err := st.HeadKey()
 	must(t, err)
@@ -379,7 +379,7 @@ func TestClerkAnchorsEachWayToNone(t *testing.T) {
 
 	// The same log, for a store whose directory is gone: the Put fails.
 	gone := t.TempDir()
-	st2, err := seal.Create(filepath.Join(gone, "store"), seal.Recovery{Key: bytes.Repeat([]byte{8}, seal.RecoveryLen)})
+	st2, err := seal.Create(filepath.Join(gone, "store"), seal.Recovery{Key: secret.Hide(bytes.Repeat([]byte{8}, seal.RecoveryLen))})
 	must(t, err)
 	t.Cleanup(st2.Close)
 	k2 := keysOf(t, st2)
@@ -537,7 +537,7 @@ func TestCounterRefusals(t *testing.T) {
 // writing the clerks no keys.
 func TestUnlockStopsAtAClerksEntryThatDoesNotRead(t *testing.T) {
 	r := newRig(t, false)
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 	must(t, err)
 	must(t, st.Put(handoff.ClerkAnchorsEntry, []byte("short")))
 	st.Close()
