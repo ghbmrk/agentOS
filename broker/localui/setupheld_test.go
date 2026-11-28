@@ -82,4 +82,5 @@ func TestHeldStoreKeepsOnlyTheHold(t *testing.T) {
 	if _, err := st.Load(); err == nil {
 		t.Fatal("an unreadable hold loaded as none")
 	}
+	localui3Kills(t) // MUT-kill-localui-3 (#6767): subtests, so mutgate's targets stay theirs
 }
