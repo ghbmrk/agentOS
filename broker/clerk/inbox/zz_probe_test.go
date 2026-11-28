@@ -33,3 +33,14 @@ func TestProbeSaysUnknownOnceMaxChecksAreSent(t *testing.T) {
 		t.Fatalf("probe %q after %d unconfirmed sends, want unknown", got, kernel.MaxChecks)
 	}
 }
+
+// A step the clerk has done probes done, never unknown or notdone, so the
+// kernel neither parks nor resends it (inbox.go Probe's first case).
+func TestProbeSaysDoneOnceAStepIsDone(t *testing.T) {
+	r := newRigOn(t, World{}, []Mail{{ID: "M", Raw: []byte(rawMail("", "a@b.test", "Hi")), Class: "personal"}}, Synthetic{}, 30)
+	p := r.step("o", key.Organize, map[string]string{"target": "M", "label": "agentOS/personal"})
+	r.run(t, p)
+	if got := r.acct.Probe(kernel.Request{Plan: p}, r.k.State()).Outcome; got != "done" {
+		t.Fatalf("probe %q after the step was done, want done", got)
+	}
+}
