@@ -25,7 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
-// REQ: CRED-8, CH-6, CH-7, CH-9
+// REQ: CH-6, CH-7, CH-9
 
 // vaultTLSKills runs, as subtests of TestScanSafeRecovers, the checks that
 // kill the mutgate survivors in vault.go and tls.go (#6763). They are
