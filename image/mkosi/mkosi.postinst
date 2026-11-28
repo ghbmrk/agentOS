@@ -5,9 +5,12 @@
 # Debian's advisories use), and os-release, which names the Debian release. image.yml hands both
 # to `tools/vulncheck.py image`. dpkg's md5sums of every installed package's files go out too, as
 # agentos.dpkg-md5sums: image/unit_rules.py counts a unit file as a package's only when it is
-# byte-identical to the one the package installed (#4677). No copied file is in SHA256SUMS.
+# byte-identical to the one the package installed (#4677). And each installed path's package, as
+# agentos.dpkg-owners ({path: package}, drop.py's owners()): image/import_sweep.py records the package and
+# version of each file its allow file pins (#6448). No copied file is in SHA256SUMS.
 set -eu
 python3 "$SRCDIR/drop.py" "$BUILDROOT"
 cp "$BUILDROOT/var/lib/dpkg/status" "$OUTPUTDIR/agentos.dpkg-status"
 cp "$BUILDROOT/usr/lib/os-release" "$OUTPUTDIR/agentos.os-release"
 cat "$BUILDROOT"/var/lib/dpkg/info/*.md5sums > "$OUTPUTDIR/agentos.dpkg-md5sums"
+python3 -I -c 'import json, sys; sys.path.insert(0, sys.argv[1]); import drop; json.dump(drop.owners(sys.argv[2]), sys.stdout, sort_keys=True)' "$SRCDIR" "$BUILDROOT" > "$OUTPUTDIR/agentos.dpkg-owners"
