@@ -202,8 +202,8 @@ func k9ProvidersPage(t *testing.T) {
 	// A body past the bound is refused before any step runs.
 	s, p = open()
 	big := k9Big(url.Values{"step": {"allow"}, "provider": {"anthropic"}, "code": {"123456"}})
-	if w := k9Serve(s.providers, "POST", "/", big); w.Code != 400 || p.sets != 0 {
-		t.Fatalf("over the bound: %d, %d sets", w.Code, p.sets)
+	if w := k9Serve(s.providers, "POST", "/", big); w.Code != 400 || w.heads != 1 || p.sets != 0 {
+		t.Fatalf("over the bound: %d, %d statuses, %d sets", w.Code, w.heads, p.sets)
 	}
 	// An unknown step is one 400, never followed by a redirect.
 	s, p = open()
@@ -215,11 +215,11 @@ func k9ProvidersPage(t *testing.T) {
 	if w := k9Serve(s.providers, "POST", "/", url.Values{"step": {"allow"}, "provider": {"anthropic"}, "code": {"1"}}); w.Code != 303 || w.pages() != 0 || p.lists != 0 {
 		t.Fatalf("allowed: %d, %d pages, %d lists", w.Code, w.pages(), p.lists)
 	}
-	// The list failing is one page.
+	// The list failing is one page, the down one, which refreshes.
 	s, p = open()
 	p.listErr = errors.New("k9: down")
-	if w := k9Serve(s.providers, "GET", "/", nil); w.pages() != 1 {
-		t.Fatalf("list down: %d pages", w.pages())
+	if w := k9Serve(s.providers, "GET", "/", nil); w.pages() != 1 || !strings.Contains(w.Body.String(), `http-equiv="refresh" content="5"`) {
+		t.Fatalf("list down: %d pages, or no refresh", w.pages())
 	}
 }
 
@@ -244,8 +244,8 @@ func k9SecondLinePage(t *testing.T) {
 	}
 	s, l = open()
 	big := k9Big(lineFormK9())
-	if w := k9Serve(s.secondLine, "POST", "/", big); w.Code != 400 || l.sets != 0 {
-		t.Fatalf("over the bound: %d, %d sets", w.Code, l.sets)
+	if w := k9Serve(s.secondLine, "POST", "/", big); w.Code != 400 || w.heads != 1 || l.sets != 0 {
+		t.Fatalf("over the bound: %d, %d statuses, %d sets", w.Code, w.heads, l.sets)
 	}
 	s, l = open()
 	if w := k9Serve(s.secondLine, "POST", "/", url.Values{"step": {"k9"}}); w.Code != 400 || w.heads != 1 || l.statuses != 0 {
@@ -257,8 +257,8 @@ func k9SecondLinePage(t *testing.T) {
 	}
 	s, l = open()
 	l.stErr = errors.New("k9: down")
-	if w := k9Serve(s.secondLine, "GET", "/", nil); w.pages() != 1 {
-		t.Fatalf("status down: %d pages", w.pages())
+	if w := k9Serve(s.secondLine, "GET", "/", nil); w.pages() != 1 || !strings.Contains(w.Body.String(), `http-equiv="refresh" content="5"`) {
+		t.Fatalf("status down: %d pages, or no refresh", w.pages())
 	}
 	// A set account fills each form with its settings, never a secret.
 	s, l = open()
@@ -354,8 +354,8 @@ func k9ForgetPage(t *testing.T) {
 	if w := k9Serve(s.forgetPage, "PUT", "/", url.Values{"step": {"find"}, "name": {"Alice"}}); w.Code != 405 || w.Header().Get("Allow") != "GET, POST" || f.finds != 0 {
 		t.Fatalf("PUT: %d %q, %d finds", w.Code, w.Header().Get("Allow"), f.finds)
 	}
-	if w := k9Serve(s.forgetPage, "POST", "/", k9Big(url.Values{"step": {"find"}, "name": {"Alice"}})); w.Code != 400 || f.finds != 0 {
-		t.Fatalf("over the bound: %d, %d finds", w.Code, f.finds)
+	if w := k9Serve(s.forgetPage, "POST", "/", k9Big(url.Values{"step": {"find"}, "name": {"Alice"}})); w.Code != 400 || w.heads != 1 || f.finds != 0 {
+		t.Fatalf("over the bound: %d, %d statuses, %d finds", w.Code, w.heads, f.finds)
 	}
 	if w := k9Serve(s.forgetPage, "POST", "/", url.Values{"step": {"k9"}}); w.Code != 400 || w.pages() != 0 {
 		t.Fatalf("unknown step: %d, %d pages", w.Code, w.pages())
