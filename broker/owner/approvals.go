@@ -462,12 +462,6 @@ func (c *Channel) moreTextLocked(id string, from int, now time.Time) (string, in
 	return c.pageLocked(r, left, 1, pageWiFi), left[0] + 1
 }
 
-// pageWiFi is moreLocked's last form: the page names its one item and
-// leaves it to the Wi-Fi page. A page that cannot state an item's
-// recipients offers no texted YES (CH-10, L3 on #6625): its replies are
-// the page-or-NO a local request text gives (pageOnlyReplies).
-const pageWiFi = lineLean + 1
-
 // pageLocked is a MORE page of request r showing the first shown of the
 // undecided items left (0-based), each in item line form lv. Its replies
 // are the request text's own, word for word (repliesLocked), except in

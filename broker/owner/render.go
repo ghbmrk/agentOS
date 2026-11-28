@@ -312,6 +312,11 @@ const (
 	// It keeps verb, object, recipients, amount, reversibility and every
 	// repeat notice (CH-10, CH-12, OWN-17; L3 on #6625).
 	lineLean
+	// pageWiFi is moreLocked's last form: the page names its one item and
+	// leaves it to the Wi-Fi page. A page that cannot state an item's
+	// recipients offers no texted YES (CH-10, L3 on #6625): its replies are
+	// the page-or-NO a local request text gives (pageOnlyReplies).
+	pageWiFi
 )
 
 // itemLineAs is itemLine in form lv.
