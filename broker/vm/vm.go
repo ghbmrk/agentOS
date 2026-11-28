@@ -487,6 +487,10 @@ type Manager struct {
 	// afterCheck, set only by tests, runs where ResumeFromCheckpoint,
 	// Merge or DeleteFiles has checked a machine and not yet acted on it.
 	afterCheck func(id string)
+	// createTailGap, set only by tests, runs between a failed create's
+	// release and unreserve: the order is pinned by running a destroy and
+	// a same-ID create there (#1712).
+	createTailGap func(id string)
 
 	diskMu   sync.Mutex // serializes disk reservations
 	diskHeld int64      // bytes reserved for copies in progress
@@ -799,6 +803,9 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 	}
 	if err != nil {
 		m.release(mc)
+		if h := m.createTailGap; h != nil {
+			h(mc.ID)
+		}
 		m.unreserve(mc)
 		return Machine{}, err
 	}
