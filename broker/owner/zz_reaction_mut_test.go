@@ -15,8 +15,9 @@ import (
 // fails without it. They call the function that holds the line directly
 // where they can.
 
-// reactAt is the clock the bare-window tests use.
-var reactAt = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+// reactAt is the clock the bare-window tests use. A func, not an
+// initialized var, so mutgate does not read every owner test as changed.
+func reactAt() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC) }
 
 // reactRequest is a guarded text: an approval request.
 func reactRequest(text string, at time.Time) sentText {
@@ -72,13 +73,13 @@ func TestMutReactionListedFormMissIsChat(t *testing.T) {
 func TestMutReactionForgetKeepsGuarded(t *testing.T) {
 	var w recentWindow
 	req := "Can I send invoice 1042 to billing? Reply YES K7 482913 or NO K7."
-	w.add(reactRequest(req, reactAt))
-	w.add(sentText{text: "Lunch is booked for Friday at noon.", at: reactAt})
-	w.forget(reactAt)
-	if _, ok := w.match(req, reactAt); !ok {
+	w.add(reactRequest(req, reactAt()))
+	w.add(sentText{text: "Lunch is booked for Friday at noon.", at: reactAt()})
+	w.forget(reactAt())
+	if _, ok := w.match(req, reactAt()); !ok {
 		t.Fatal("forget dropped a guarded text")
 	}
-	if _, ok := w.match("Lunch is booked for Friday at noon.", reactAt); ok {
+	if _, ok := w.match("Lunch is booked for Friday at noon.", reactAt()); ok {
 		t.Fatal("forget kept a plain text")
 	}
 }
@@ -86,8 +87,8 @@ func TestMutReactionForgetKeepsGuarded(t *testing.T) {
 // An empty quote marks nothing, not a text that normalizes to empty.
 func TestMutReactionEmptyQuoteMarksNothing(t *testing.T) {
 	var w recentWindow
-	w.add(sentText{text: "...", at: reactAt})
-	if _, ok := w.match("…", reactAt); ok {
+	w.add(sentText{text: "...", at: reactAt()})
+	if _, ok := w.match("…", reactAt()); ok {
 		t.Fatal("an empty quote matched")
 	}
 }
@@ -96,16 +97,16 @@ func TestMutReactionEmptyQuoteMarksNothing(t *testing.T) {
 func TestMutReactionOldTextsAgeOut(t *testing.T) {
 	var w recentWindow
 	text := "Lunch is booked for Friday at noon."
-	w.add(sentText{text: text, at: reactAt})
-	late := reactAt.Add(recentMaxAge + time.Minute)
-	if _, ok := w.match(text, reactAt); !ok {
+	w.add(sentText{text: text, at: reactAt()})
+	late := reactAt().Add(recentMaxAge + time.Minute)
+	if _, ok := w.match(text, reactAt()); !ok {
 		t.Fatal("a recent text did not match")
 	}
 	if _, ok := w.match(text, late); ok {
 		t.Fatal("match found a text past the window")
 	}
 	all := func(sentText) bool { return true }
-	if _, ok := w.within("Loved it: "+text, reactAt, all); !ok {
+	if _, ok := w.within("Loved it: "+text, reactAt(), all); !ok {
 		t.Fatal("within missed a recent text")
 	}
 	if _, ok := w.within("Loved it: "+text, late, all); ok {
@@ -117,8 +118,8 @@ func TestMutReactionOldTextsAgeOut(t *testing.T) {
 // its codes masked too.
 func TestMutReactionWithinRestoredMasks(t *testing.T) {
 	var w recentWindow
-	w.texts = append(w.texts, sentText{text: maskCodes(normQuote("Your code is 482913 for K7")), at: reactAt, restored: true})
-	if _, ok := w.within("Liked: Your code is 482913 for K7 ok", reactAt, sentText.guarded); !ok {
+	w.texts = append(w.texts, sentText{text: maskCodes(normQuote("Your code is 482913 for K7")), at: reactAt(), restored: true})
+	if _, ok := w.within("Liked: Your code is 482913 for K7 ok", reactAt(), sentText.guarded); !ok {
 		t.Fatal("within missed a restored text")
 	}
 }
