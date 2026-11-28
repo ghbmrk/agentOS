@@ -2955,6 +2955,94 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertIsNone(data["targets"]["base"]["tests"])
             self.assertTrue({4, 5, 7, 11} <= set(data["targets"]["lines"]["hint.go"]))
 
+    def test_an_initializer_that_runs_nothing_reaches_only_its_readers(self):
+        # TOOL-mutgate-test-var-scope (#6609, #6702): a test file's package var whose initializer holds no
+        # call is reached by the tests that name it; one that may run code is still every test, and so is
+        # one no test names (fail closed). A "C" literal past the imports is no cgo.
+        # REQ: TOOL-mutgate-test-var-scope
+        def reach(var, extra="", tail=""):
+            text = ('package h\n\nimport (\n\t"strings"\n\t"testing"\n\t"time"\n)\n' + extra + "\n" + var + "\n\n"
+                    'func TestA(t *testing.T) {\n\t_ = v\n}\n\nfunc TestB(t *testing.T) {\n\t_ = strings.ToUpper("C")\n'
+                    '\t_ = time.Second\n}\n' + tail)
+            at = 1 + text.split("\n").index(var.split("\n")[0])
+            return mutgate.reaching_tests({"broker/h/a_test.go": text}, {"broker/h/a_test.go": {at}})
+        for name, var in (
+                ("slice literal", 'var v = []string{"a", "b"}'),
+                ("map of structs", 'var v = map[string]struct {\n\tn   int\n\twhy string\n}{\n\t"a": {1, "x"},\n}'),
+                ("func literal", 'var v = func() string { return strings.Repeat("a", 2) }'),
+                ("grouped", 'var (\n\tv = []int{1}\n\tw = 2\n)'),
+                ("constant expression", 'var v = 3 * time.Second')):
+            with self.subTest("narrow " + name):
+                self.assertEqual(reach(var), ["TestA"])
+        for name, var, extra, tail in (
+                ("a call", 'var v = time.Date(2026, 10, 13, 14, 2, 0, 0, time.UTC)', "", ""),
+                ("a conversion", 'var v = []byte("a")', "", ""),
+                ("a called literal", 'var v = func() int { return 1 }()', "", ""),
+                ("out of gofmt's layout", 'var v = []int{1,2}', "", ""),
+                ("a cgo file", 'var v = []int{1}', '\n// int c(void) { return 1; }\nimport "C"\n', ""),
+                ("a linkname file", 'var v = []int{1}', "", '\n//go:linkname x y\n'),
+                ("a package-wide directive", '//go:debug panicnil=1\nvar v = []int{1}', "", "")):
+            with self.subTest("widen " + name):
+                self.assertIsNone(reach(var, extra, tail))
+        with self.subTest("no reader"):
+            self.assertIsNone(reach('var v = []int{1}'.replace("v =", "u =")))
+        # L3 on #6762: a receive takes the value TestB would get, so `var v = 0` there flips TestB (go test:
+        # FAIL, then ok); one inside a func literal's body runs only when a test calls it.
+        recv = ('package h\n\nimport "testing"\n\nvar ch = fill()\n\n{v}\n\nfunc fill() chan int {{\n'
+                '\tc := make(chan int, 1)\n\tc <- 1\n\treturn c\n}}\n\nfunc TestA(t *testing.T) {{\n\t_ = v\n}}\n\n'
+                'func TestB(t *testing.T) {{\n\tselect {{\n\tcase <-ch:\n\tdefault:\n\t\tt.Fatal("empty")\n\t}}\n}}\n')
+        for name, var, want in (("widen a receive", "var v = <-ch", None),
+                                ("widen a receive in a literal", "var v = []int{<-ch}", None),
+                                ("widen a send-only channel type", "var v = []chan<- int{}", None),
+                                ("narrow a receive in a literal's body", "var v = func() int { return <-ch }",
+                                 ["TestA"])):
+            with self.subTest(name):
+                self.assertEqual(mutgate.reaching_tests({"broker/h/a_test.go": recv.format(v=var)},
+                                                        {"broker/h/a_test.go": {7}}), want)
+        # L3 and Potency on #6762: the var in a linkname or out-of-layout file, its readers in
+        # another file, so only _quiet_vars' own guard widens it.
+        for name, head in (("linkname", 'import "unsafe"\n\n//go:linkname p runtime.p\nvar p unsafe.Pointer\n'),
+                           ("out of layout", 'var p  = 1\n')):
+            with self.subTest("widen across files: " + name):
+                a = "package h\n\n" + head + "\nvar v = []int{1}\n"
+                b = 'package h\n\nimport "testing"\n\nfunc TestA(t *testing.T) {\n\t_ = v\n}\n\nfunc TestB(t *testing.T) {}\n'
+                at = 1 + a.split("\n").index("var v = []int{1}")
+                self.assertIsNone(mutgate.reaching_tests({"broker/h/a_test.go": a, "broker/h/b_test.go": b},
+                                                         {"broker/h/a_test.go": {at}}))
+        # Security on #6762: an external test file pulls a var or helper by symbol, naming it only in a
+        # directive (go test: TestExt fails once quietVar or helper changes).
+        b = ('package h\n\nimport "testing"\n\nvar quietVar = 1\n\nfunc helper() int {\n\treturn 1\n}\n\n'
+             'func TestA(t *testing.T) {\n\t_ = quietVar\n\t_ = helper()\n}\n')
+        for name, pull in (("var", "//go:linkname shared example.com/h.quietVar\nvar shared int\n"),
+                           ("helper", "//go:linkname h example.com/h.helper\nfunc h() int\n"),
+                           ("var from a test body", "var shared int\n\nfunc TestIn(t *testing.T) {\n"
+                                                    "\t//go:linkname shared example.com/h.quietVar\n}\n")):
+            with self.subTest("widen a linkname pull of a " + name):
+                c = ('package h_test\n\nimport (\n\t"testing"\n\t_ "unsafe"\n)\n\n' + pull +
+                     '\nfunc TestExt(t *testing.T) {}\n')
+                for line in (5, 8):
+                    self.assertIsNone(mutgate.reaching_tests({"broker/h/b_test.go": b, "broker/h/c_test.go": c},
+                                                             {"broker/h/b_test.go": {line}}))
+        with self.subTest("narrow beside a linkname in prose"):
+            c = 'package h_test\n\n// TestExt needs no //go:linkname here.\n\nfunc TestExt(t *testing.T) {}\n'
+            self.assertEqual(mutgate.reaching_tests({"broker/h/b_test.go": b, "broker/h/c_test.go": c},
+                                                    {"broker/h/b_test.go": {5}}), ["TestA"])
+        with self.subTest("widen a package file's var"):  # package code, not only tests, may read it
+            self.assertIsNone(mutgate.reaching_tests(
+                {"broker/h/a.go": "package h\n\nvar v = []int{1}\n",
+                 "broker/h/b_test.go": 'package h\n\nimport "testing"\n\nfunc TestA(t *testing.T) {\n\t_ = v\n}\n'},
+                {"broker/h/a.go": {3}}))
+        with self.subTest("narrow across files"):
+            self.assertEqual(mutgate.reaching_tests(
+                {"broker/h/a_test.go": "package h\n\nvar p = 1\n\nvar v = []int{1}\n",
+                 "broker/h/b_test.go": 'package h\n\nimport "testing"\n\nfunc TestA(t *testing.T) {\n\t_ = v\n}\n\n'
+                                       'func TestB(t *testing.T) {}\n'}, {"broker/h/a_test.go": {5}}), ["TestA"])
+        self.assertTrue(mutgate._tied('package h\n\n// int c(void) { return 1; }\nimport "C"\n\nfunc f() {}\n'))
+        self.assertTrue(mutgate._tied('package h\n\nimport (\n\t"C"\n\t"fmt"\n)\n'))
+        self.assertTrue(mutgate._tied('package h\n\n  var x = "C"\nimport "C"\n'))  # out of layout: read as the header
+        self.assertFalse(mutgate._tied('package h\n\nimport "fmt"\n\nfunc f() { fmt.Println("C", `C`) }\n'))
+        self.assertFalse(mutgate._tied('package h\n\n// import "C" in a comment\n\nvar s = "C"\n'))
+
     def test_reaching_tests_name_the_tests_that_reach_a_line(self):
         # D-319 (#5826): a line outside a test function maps to the tests that name its declaration,
         # transitively; a type reaches its methods; a file's header reaches what the file reaches.

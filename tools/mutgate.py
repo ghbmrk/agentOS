@@ -1690,7 +1690,9 @@ def _order_risk(files, facts, decls, clause, outside):
 
 def _calls_nothing(bare):
     """Whether a package var declaration (its text, comments and literal contents blanked) runs no call
-    when initialized (#6687): no `(` but a func literal's or func type's own, gofmt's layout read. A func
+    and changes no state when initialized (#6687): no `(` but a func literal's or func type's own, and no
+    `<-` outside a func literal's body (a channel receive, the one Go expression that changes state
+    without a call; L3 on #6762), gofmt's layout read. A func
     literal is `func(params)`, results, then ` {` and its body; a func type is the same with no ` {`
     (`func() error{` opens a composite literal). Anything else with a `(` (a call, a conversion, a method
     expression, a called literal's `}(`) reads as a call."""
@@ -1716,7 +1718,7 @@ def _calls_nothing(bare):
             if (end := _closer(text, end + 1 + kind.end())) is None:  # a literal: its body runs later
                 return False
         text = text[:m.start()] + text[end + 1:]
-    return "(" not in text
+    return "(" not in text and "<-" not in text  # a receive takes a value another reader would get (#6762)
 
 
 def _order_seed(d, quals, specs, bare, refs, clause, outside):
@@ -2111,7 +2113,7 @@ def _widen(lines, extra):
 # Lexical reach over a package's _test.go files (D-319, #5826). A declaration (_decls) reaches every
 # declaration whose name is a word of its code (string literals too: more is safe), and a type
 # reaches its methods. A test reaches what it reaches, transitively; what every test may run
-# (TestMain, init, a package var with an initializer, a blank or dot import, a method on a type no
+# (TestMain, init, a package var with an initializer that may run code (_quiet_vars), a blank or dot import, a method on a type no
 # test file of its package clause declares, which package code may call through an interface, a
 # file with a linkname, a directive go reads package-wide, such as go:debug) reaches all of them, as
 # does a line no test reaches (fail closed). A named import reaches its file's declarations' tests (D-319).
@@ -2162,8 +2164,16 @@ def _uncommented(text, literals=True):
 
 def _tied(text):
     """Whether a file ties its code to itself: a go:linkname, or cgo (`import "C"`, whose preamble is the
-    file's own; any "C" literal is read as one, #6385)."""
-    return "go:linkname" in text or bool(re.search(r'"C"|`C`', _uncommented(text)))
+    file's own; #6385). Go takes imports only before a file's first other declaration, so a "C" literal
+    from the start of the file to the first column-0 `func`, `type`, `var` or `const` (comments and,
+    for finding that line, literal contents left out) is read as cgo; a later one, such as a test's
+    `"C"` argument, is none (TOOL-mutgate-test-var-scope)."""
+    if "go:linkname" in text:
+        return True
+    code, bare = _uncommented(text).split("\n"), _uncommented(text, False).split("\n")
+    end = next((i for i, row in enumerate(bare) if DECL.match(row) and not row.startswith(("import", "package"))),
+               len(bare))
+    return bool(re.search(r'"C"|`C`', "\n".join(code[:end])))
 
 
 def _decls(path, text):
@@ -2222,6 +2232,34 @@ def _decls(path, text):
     return out
 
 
+def _quiet_vars(files, decls):
+    """decls with every test-file package var whose initializer runs nothing read as an ordinary
+    declaration, reached by the tests that name it (TOOL-mutgate-test-var-scope): its file in gofmt's
+    layout, no linkname or cgo, no directive go reads package-wide on it, and its text (comments and
+    literal contents blanked) holding no `(` but a func literal's or func type's own and no receive
+    outside one's body (_calls_nothing, #6687). Such an initializer runs no statement and changes no
+    state before a test starts, and only test code, which names it, can read what it holds (a linkname
+    anywhere in the package is every test, reaching_tests); what a
+    reached test later writes through it (an alias of another var) is the static-reach bound every
+    helper and test body has (MUT-test-helper-scope-1). Any other initialized var stays every test."""
+    bare = {p: _uncommented(t, False) for p, t in files.items()}
+    maybe = [i for i, d in enumerate(decls) if d[1] == "var" and d[5] and d[0].endswith("_test.go")
+             and not _tied(files[d[0]]) and _calls_nothing(_decl_text(bare[d[0]], d))
+             and all(m in LOCAL_DIRECTIVES for m in DIRECTIVE.findall(
+                 "\n".join(files[d[0]].split("\n")[d[6] - 1:d[7]])))]
+    if not maybe:
+        return decls
+    rough = _unformatted({d[0]: files[d[0]] for d in (decls[i] for i in maybe)})
+    out = list(decls)
+    for i in maybe:
+        if decls[i][0] not in rough:
+            out[i] = decls[i][:5] + (False,) + decls[i][6:]
+    return out
+
+
+LINKNAME = re.compile(r"^\s*//go:linkname\b", re.M)
+
+
 def reaching_tests(files, changed, state=None):
     """Sorted names of the test functions in files ({path: text}, every _test.go file of one
     package) that reach the lines changed names ({path: set(line)}), or None when one of those lines
@@ -2229,8 +2267,13 @@ def reaching_tests(files, changed, state=None):
     first declaration, the package clause, an import) reaches what that file's declarations reach.
     A line of state ({path: set(line)}, read_by's calls) also reaches the tests that reach any
     package var the declaration holding it reaches, an init's or TestMain's reach aside: a test
-    can read what a reader left there without reaching the reader (#6657)."""
-    decls = [d for path, text in sorted(files.items()) for d in _decls(path, text)]
+    can read what a reader left there without reaching the reader (#6657). A `//go:linkname` line in
+    any file is every test: an external test file can pull a test-file declaration by symbol without
+    naming it in code (Security on #6762). A pull from a non-test file or from assembly is srclint's
+    to refuse (MUT-test-helper-scope-1)."""
+    if any(LINKNAME.search(text) for text in files.values()):
+        return None
+    decls = _quiet_vars(files, [d for path, text in sorted(files.items()) for d in _decls(path, text)])
     by_name, types = collections.defaultdict(list), {(d[8], n) for d in decls if d[1] == "type" for n in d[2]}
     methods = collections.defaultdict(list)
     for i, (_, kind, names, recv, *_rest) in enumerate(decls):
