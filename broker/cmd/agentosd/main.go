@@ -183,11 +183,16 @@ func (l *lateServices) Reset(id string) {
 	}
 }
 
-// lateStatus is STATUS's agent line: the keeper's once it runs, and "not
-// set up" before that or when no keeper could start.
+// lateStatus is STATUS's agent line: the keeper's once it runs, "starting"
+// while the box is still bringing the agent up, and "not set up" when no
+// keeper could start.
 type lateStatus struct {
 	k   atomic.Pointer[keeper]
 	off string // set before the daemon runs: why the agent is off (PE6)
+	// starting holds from before the daemon runs until the guest plane
+	// and the keeper have had their chance to start (settle): until then
+	// no keeper is not a failure (#6176).
+	starting atomic.Bool
 	// caps is the capability-off registry's state: when its line names
 	// the agent, this line says nothing, so STATUS has one (OP-9).
 	caps *capState
@@ -195,6 +200,18 @@ type lateStatus struct {
 	// replies, STATUS says so (DEL-1e).
 	replies atomic.Pointer[replyWait]
 }
+
+// newLateStatus is the agent line of a box still starting: it says
+// "starting" until settle.
+func newLateStatus(off string, caps *capState) *lateStatus {
+	l := &lateStatus{off: off, caps: caps}
+	l.starting.Store(true)
+	return l
+}
+
+// settle ends the start-up window: from now on no keeper reads as not set
+// up. A failed start names its cause through off or caps before this.
+func (l *lateStatus) settle() { l.starting.Store(false) }
 
 type replyWait struct {
 	p interface{ RepliesWaiting() bool }
@@ -212,6 +229,9 @@ func (l *lateStatus) Status() string {
 	}
 	if l.caps != nil && l.caps.agentNamed() {
 		return ""
+	}
+	if l.starting.Load() {
+		return agentStarting
 	}
 	return agentNotSet
 }
@@ -537,9 +557,10 @@ func main() {
 	// are not running.
 	agent := &lateAgent{}
 	cfg.Agent = agent
-	// Until the keeper runs, STATUS says the agent is not set up; it says
-	// so for good if the machine plane or the agent's setup fails.
-	agentStatus := &lateStatus{off: agentOff, caps: caps}
+	// Until the keeper runs, STATUS says the agent is starting; once the
+	// machine plane and the agent's setup have had their chance (settle
+	// below), no keeper reads as not set up (#6176).
+	agentStatus := newLateStatus(agentOff, caps)
 	cfg.AgentStatus = agentStatus.Status
 	// The code-generator seed lives in the vault, which only the vault
 	// process holds (P2-4a); the channel asks it to check high-tier codes
@@ -866,6 +887,9 @@ func main() {
 			}
 		}
 	}
+	// Every start-up path above has run: a keeper is stored, or the
+	// cause is named, or the agent is not set up.
+	agentStatus.settle()
 	if line != nil {
 		go line.run(ctx)
 	}

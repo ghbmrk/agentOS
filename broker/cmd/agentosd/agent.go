@@ -20,9 +20,13 @@ import (
 // The agent machine's STATUS lines (UX-56-1): fixed words only; raw errors
 // go to the log.
 const (
-	agentWaiting = "Your agent is starting, waiting for memory."
-	agentFailed  = "Your agent is starting; the last try failed."
-	agentNotSet  = "Your agent is not set up; I need an update or a restart."
+	// agentStarting: the box is still bringing the agent up and nothing
+	// has failed yet: before the guest plane has had its chance to open,
+	// and before the keeper's first try returns (#6176).
+	agentStarting = "Your agent is starting."
+	agentWaiting  = "Your agent is starting, waiting for memory."
+	agentFailed   = "Your agent is starting; the last try failed."
+	agentNotSet   = "Your agent is not set up; I need an update or a restart."
 	// repliesWaiting: the guest plane's reply outbox is full (DEL-1e).
 	repliesWaiting = "Your agent's replies are waiting to be sent."
 )
@@ -188,7 +192,13 @@ func launchSpec(path string) (argv, env []string, err error) {
 // none outlives the mode (security R1 on #147, R2 on #149).
 func agentKeeper(ctx context.Context, m *vm.Manager, record func(journal.SleepNote) error, id string, spec vm.Spec) *keeper {
 	wakeLeftover(ctx, m, id, record, log.Printf)
-	return &keeper{m: m, id: id, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentWaiting}
+	return newKeeper(m, id, spec)
+}
+
+// newKeeper is a keeper that has not tried yet: STATUS says the agent is
+// starting, naming no cause, until its first ensure returns (#6176).
+func newKeeper(m liveMachines, id string, spec vm.Spec) *keeper {
+	return &keeper{m: m, id: id, spec: spec, every: 30 * time.Second, logf: log.Printf, status: agentStarting}
 }
 
 // sleepMachines is the vm.Manager part wakeLeftover uses.
