@@ -25,7 +25,7 @@ func TestTheAIKeyErrorsNameTheirCause(t *testing.T) {
 		err  error
 		want string
 	}{
-		{ErrKeyRefused, "The provider did not accept that key."},
+		{ErrKeyRefused, refusedKeyText},
 		{ErrKeyUnchecked, "could not reach the provider to check that key"},
 		{ErrKeysLimited, "Too many keys"},
 		{ErrKeyNotTaken, "Paste the API key"},
@@ -54,6 +54,29 @@ func TestTheAIKeyErrorsNameTheirCause(t *testing.T) {
 		if len(r.hooks.keys) != 0 || r.hooks.finished != "" {
 			t.Fatalf("%v: stored or finished", c.err)
 		}
+	}
+}
+
+// refusedKeyText is the refused-key text: it names the usual cause's fix,
+// a truncated paste (#1359), and the permission an OpenAI restricted key
+// needs for the check (#1361).
+const refusedKeyText = "The provider did not accept that key. Copy the whole key again from your provider's page and paste it here. An OpenAI restricted key also needs the \"Models: Read\" permission."
+
+const keyCheckNote = "I check the key with the provider before saving it. This takes a few seconds."
+
+// #1358: the key check waits up to SetupKeyCheckWait with no script on the
+// page, so the API-key form says before the tap that saving takes a few
+// seconds.
+func TestTheAIKeyFormSaysTheKeyIsChecked(t *testing.T) {
+	r := newRig(t)
+	r.runSetupToAI()
+	page := html.UnescapeString(r.get("/setup"))
+	forms := strings.Count(page, `action="/setup/ai-key"`)
+	if forms == 0 {
+		t.Fatal("no API-key form on the AI step")
+	}
+	if n := strings.Count(page, keyCheckNote); n != forms {
+		t.Fatalf("%d of %d API-key forms say the key is checked first", n, forms)
 	}
 }
 
