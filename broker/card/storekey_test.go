@@ -10,6 +10,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // REQ: REC-1, REC-4, BAK-1
@@ -26,7 +27,7 @@ func TestCardRecoveryKeyOpensStoreSlot(t *testing.T) {
 		t.Fatalf("store recovery key is %d bytes, the slot takes %d", len(rk), seal.RecoveryLen)
 	}
 	path := filepath.Join(t.TempDir(), "store")
-	st, err := seal.Create(path, seal.Recovery{Key: rk})
+	st, err := seal.Create(path, seal.Recovery{Key: secret.Hide(rk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +40,7 @@ func TestCardRecoveryKeyOpensStoreSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opened, err := seal.Unlock(path, seal.Recovery{Key: again})
+	opened, err := seal.Unlock(path, seal.Recovery{Key: secret.Hide(again)})
 	if err != nil {
 		t.Fatalf("the typed card key does not open the recovery slot: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestCardRecoveryKeyOpensStoreSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := seal.Unlock(path, seal.Recovery{Key: other}); !errors.Is(err, seal.ErrWrongFactor) {
+	if _, err := seal.Unlock(path, seal.Recovery{Key: secret.Hide(other)}); !errors.Is(err, seal.ErrWrongFactor) {
 		t.Fatalf("another card's key: %v, want ErrWrongFactor", err)
 	}
 }

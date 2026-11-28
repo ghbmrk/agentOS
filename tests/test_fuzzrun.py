@@ -96,6 +96,8 @@ class FuzzrunTest(unittest.TestCase):
             self.assertEqual(argv[argv.index("-fuzz") + 1], "^FuzzFrames$")
             self.assertEqual(argv[argv.index("-run") + 1], "^$")
             self.assertIn("-timeout", argv)
+            # CI-soak-green (#6571): go's default 60s per new input held the workers at 0/s
+            self.assertEqual(argv[argv.index("-fuzzminimizetime") + 1], "1000x")
 
     def test_chunks_fill_the_budget(self):
         f = self.fake(FAKE_RATE=1000)

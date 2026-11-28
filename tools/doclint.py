@@ -17,6 +17,9 @@
                 none keeps its own `**State:**` line (state lives on the work-item issue), and each
                 has an `**Acceptance tests:**` line (or `## Acceptance tests` heading, `**Acceptance:**`) unless listed in tools/brief_acceptance_baseline.txt
                 (FIRST-PASS, #1818)
+  all *.md      no `Trusted-core:` PR-body line outside the records (DECISIONS.md, decisions/, reviews/,
+                tools/ASSUMPTIONS.md) and SPEC.md: tools/trusted_base.py reads only the committed
+                `trusted-core #<PR> -- <decision ID>` line (#6404, DOC-trusted-core-line #6707)
 
 BOARD.md is generated from the work-item issues (tools/board.py), so its rows are checked there, not here.
 
@@ -236,6 +239,24 @@ def assumption_ids(root, files):
                     yield f"{name}:{n}: duplicate ID {cells[0]} (first on line {seen[cells[0]][0]}){hint}"
 
 
+BODY_WAIVER = "Trusted-core:"
+# Records keep past reasons; SPEC.md changes only through an L1 PR (#6523 drops its line).
+WAIVER_HISTORY = ("DECISIONS.md", "SPEC.md", "tools/ASSUMPTIONS.md")  # KRN-2m-record-1 tells the history
+WAIVER_HISTORY_DIRS = ("decisions/", "reviews/")
+
+
+def body_waivers(root, files):
+    """A `Trusted-core:` line in a brief or rule file tells a builder to write a PR-body line the gate
+    ignores, so the trusted-base run stays red and a reviewer can accept a waiver that does nothing (#6707)."""
+    for name in files:
+        if name in WAIVER_HISTORY or name.startswith(WAIVER_HISTORY_DIRS):
+            continue
+        for n, line in enumerate((root / name).read_text().splitlines(), 1):
+            if BODY_WAIVER in line:
+                yield (f"{name}:{n}: `{BODY_WAIVER}` names a PR-body line tools/trusted_base.py ignores; "
+                       "cite the committed `trusted-core #<PR> -- <decision ID>` line in tools/trusted_base_reasons.txt")
+
+
 CODE = (".go", ".py", ".sh", ".md", ".c", ".h", ".rs", ".js", ".ts")  # a name holding `allow` that is code or prose
 
 
@@ -267,7 +288,7 @@ def lint(root):
     root = pathlib.Path(root)
     files = markdown_files(root)
     return [*readme(root), *rule_files(root), *operating_refs(root, files),
-            *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files), *record_files(root),
+            *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files), *body_waivers(root, files), *record_files(root),
             *assumptions_ids.check(root, files)]
 
 

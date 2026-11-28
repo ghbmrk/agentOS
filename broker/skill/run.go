@@ -29,6 +29,9 @@ type State struct {
 	RequestID string `json:"request_id"`
 	State     string `json:"state"`
 	Reason    string `json:"reason,omitempty"`
+	// Notes is the broker's text after its first content item (an untold
+	// step-snapshot note, SR2-3s), carried to the agent as it is (#1568).
+	Notes []string `json:"-"`
 }
 
 // Succeeded is the one state that lets a skill go on: the kernel's status
@@ -57,6 +60,9 @@ type Result struct {
 	// steps not yet run, with their bound values, for the model to finish.
 	Stopped   *Stopped `json:"stopped,omitempty"`
 	Remaining []Effect `json:"remaining,omitempty"`
+	// Notes are every step's State.Notes, in order. The server sends each
+	// as its own content item after the JSON, so the JSON stays whole.
+	Notes []string `json:"-"`
 }
 
 // Done is one step that succeeded.
@@ -101,6 +107,7 @@ func Run(ctx context.Context, s *Skill, runID string, args map[string]json.RawMe
 	}
 	for i, e := range effects {
 		st, err := fx.Request(ctx, e)
+		res.Notes = append(res.Notes, st.Notes...)
 		if err != nil {
 			res.Stopped = &Stopped{Step: i + 1, RequestID: e.RequestID, Why: brokerRefused(err)}
 			res.Remaining = effects[i:]

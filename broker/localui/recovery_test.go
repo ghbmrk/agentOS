@@ -234,7 +234,7 @@ func TestRecoveryKeyWithCRLFOpensTheSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "store")
-	st, err := seal.Create(path, seal.Recovery{Key: clean})
+	st, err := seal.Create(path, recoveryOf(clean))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestRecoveryKeyWithCRLFOpensTheSlot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", typed, err)
 		}
-		st, err := seal.Unlock(path, seal.Recovery{Key: k})
+		st, err := seal.Unlock(path, recoveryOf(k))
 		if err != nil {
 			t.Fatalf("%q does not open the slot: %v", typed, err)
 		}
@@ -270,6 +270,7 @@ func TestRecoveryKeyWithCRLFOpensTheSlot(t *testing.T) {
 	if !strings.Contains(string(body), "group 1 of the recovery key looks mistyped") || r.srv.recovery.p != nil {
 		t.Fatal("a mistyped key started a replacement")
 	}
+	recoveryEdges(t)
 }
 
 // Each refusal: a wrong tap, busy and no answer keep the replacement for
