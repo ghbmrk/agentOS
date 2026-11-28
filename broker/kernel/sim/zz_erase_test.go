@@ -1,6 +1,6 @@
 package sim
 
-// REQ: EVL-1, LOG-4, CAP-3
+// REQ: EVL-1, LOG-4
 
 import (
 	"errors"
