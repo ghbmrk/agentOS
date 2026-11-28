@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -321,8 +322,14 @@ func TestLocalUI12PlugModemUnderAnFdLimit(t *testing.T) {
 	if _, err := os.Stat("/dev/ptmx"); err != nil {
 		t.Skip("no /dev/ptmx")
 	}
-	child := func(k int) string {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestLocalUI12PlugModemUnderAnFdLimit$", "-test.count=1")
+	// once is one child's result at k; a child stopped at its minute, or
+	// killed by the runtime's throw when its poller started inside the
+	// limit, reads "no result". The child gets no -test.timeout: its timer
+	// would start the poller before the plug.
+	once := func(k int) string {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLocalUI12PlugModemUnderAnFdLimit$", "-test.count=1")
 		cmd.Env = append(os.Environ(), fdChildEnv+"="+strconv.Itoa(k))
 		out, _ := cmd.Output()
 		for _, l := range strings.Split(string(out), "\n") {
@@ -331,6 +338,20 @@ func TestLocalUI12PlugModemUnderAnFdLimit(t *testing.T) {
 			}
 		}
 		return "no result"
+	}
+	// child is the first result at k from a child whose poller had not
+	// started before the plug: any timer can start it first, so such a
+	// child, or one the runtime's throw stopped, is run again, a bounded
+	// number of times. "polled" means every attempt's poller had started;
+	// past k=0 that is a miss, not a skip, so a mutant cannot skip it.
+	child := func(k int) string {
+		got := ""
+		for i := 0; i < 8; i++ {
+			if got = once(k); got != "polled" && got != "no result" {
+				return got
+			}
+		}
+		return got
 	}
 	if got := child(0); got == "polled" {
 		t.Skip("the runtime's poller holds descriptors before the plug")
