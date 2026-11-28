@@ -51,7 +51,7 @@ func newCapBox(t *testing.T) *capBox { return newCapBoxWith(t, nil) }
 func newCapBoxWith(t *testing.T, add func(*capLines)) *capBox {
 	t.Helper()
 	dir := t.TempDir()
-	b := &capBox{t: t, dir: dir, caps: newCapState(""), agent: &lateStatus{}}
+	b := &capBox{t: t, dir: dir, caps: newCapState(""), agent: newLateStatus("", nil)}
 	b.cfg = daemon.Config{
 		JournalPath: filepath.Join(dir, "journal.log"), SocketDir: filepath.Join(dir, "run"),
 		OwnerNumber: ownerNum, ModemUID: os.Getuid(), Admission: admission.Config{CapacityMB: 4500, HeadroomMB: 600},
@@ -285,7 +285,7 @@ func TestEveryOffCapabilityHasOneStatusLine(t *testing.T) {
 			if !strings.Contains(s, line) {
 				t.Errorf("STATUS %q lacks %q", s, line)
 			}
-			if strings.HasPrefix(c.name, "Agent") && strings.Contains(s, agentNotSet) {
+			if strings.HasPrefix(c.name, "Agent") && (strings.Contains(s, agentNotSet) || strings.Contains(s, agentStarting)) {
 				t.Errorf("a second agent line: %q", s)
 			}
 			if c.clear != nil {
