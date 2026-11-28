@@ -50,18 +50,19 @@ func vaultTLSKills(t *testing.T) {
 }
 
 // unixVault serves h on a unix socket, as the vault process's unlock
-// socket, and returns a client for it.
-func unixVault(t *testing.T, h http.HandlerFunc) (*UnlockClient, *http.Server) {
+// socket, and returns a client for it. A non-nil state hook is set on
+// the server before it serves, so the serving goroutine never races it.
+func unixVault(t *testing.T, h http.HandlerFunc, state func(net.Conn, http.ConnState)) *UnlockClient {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "u.sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: h}
+	srv := &http.Server{Handler: h, ConnState: state}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
-	return NewUnlockClient(path), srv
+	return NewUnlockClient(path)
 }
 
 func unlockClientWire(t *testing.T) {
@@ -83,7 +84,7 @@ func unlockClientWire(t *testing.T) {
 			w.Write([]byte("not json"))
 		}
 	}
-	u, _ := unixVault(t, reply)
+	u := unixVault(t, reply, nil)
 	ctx := context.Background()
 	if st, err := u.Status(ctx); err != nil || st.State != "locked" {
 		t.Fatalf("status %+v, %v", st, err)
@@ -119,18 +120,17 @@ func unlockClientWire(t *testing.T) {
 // decoder reads leaves its connection open until the body is closed.
 func unlockClientClosesEachReply(t *testing.T) {
 	closed := make(chan struct{}, 1)
-	u, srv := unixVault(t, func(w http.ResponseWriter, r *http.Request) {
+	u := unixVault(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"state":"locked"}`))
 		w.Write(bytes.Repeat([]byte(" "), 32<<10))
-	})
-	srv.ConnState = func(_ net.Conn, s http.ConnState) {
+	}, func(_ net.Conn, s http.ConnState) {
 		if s == http.StateClosed {
 			select {
 			case closed <- struct{}{}:
 			default:
 			}
 		}
-	}
+	})
 	if _, err := u.Status(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -336,16 +336,34 @@ func vaultTextsNameEachRefusal(t *testing.T) {
 	}
 }
 
-// A decoder that panics on a photo makes it an unreadable photo. The
-// format is registered here, under a magic no real photo starts with,
-// since no stdlib decoder is known to panic.
+// A decoder that panics on a photo makes it an unreadable photo. No
+// stdlib decoder is known to panic, so the test registers one under a
+// fresh random magic. image cannot unregister a format, so the format is
+// armed only while this test runs: afterwards both its funcs return an
+// error, which ScanPassphrase treats exactly as an unknown format, and a
+// later fuzz input carrying the magic meets no panic.
 func scanSafeRecoversADecoderPanic(t *testing.T) {
-	image.RegisterFormat("synthetic-panic", "SYNTHPANIC", func(io.Reader) (image.Image, error) {
+	var armed sync.Mutex
+	on := true
+	live := func() bool { armed.Lock(); defer armed.Unlock(); return on }
+	defer func() { armed.Lock(); on = false; armed.Unlock() }()
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	magic := fmt.Sprintf("SYNTHPANIC%x", nonce)
+	image.RegisterFormat("synthetic-panic-"+magic, magic, func(io.Reader) (image.Image, error) {
+		if !live() {
+			return nil, errors.New("synthetic format retired")
+		}
 		panic("synthetic decoder panic")
 	}, func(io.Reader) (image.Config, error) {
+		if !live() {
+			return image.Config{}, errors.New("synthetic format retired")
+		}
 		return image.Config{ColorModel: color.RGBAModel, Width: 8, Height: 8}, nil
 	})
-	if pass, err := scanSafe([]byte("SYNTHPANIC")); pass != "" || err != ErrNotPhoto {
+	if pass, err := scanSafe([]byte(magic)); pass != "" || err != ErrNotPhoto {
 		t.Errorf("a panicking decoder: %q, %v", pass, err)
 	}
 }
