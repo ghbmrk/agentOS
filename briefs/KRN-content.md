@@ -34,7 +34,7 @@ Work item: #3550, from the gap noted on #3515 (comment 6458131269). Tier A. Unbl
 
 **Requirement IDs:** LOG-4, LOG-1, CLK-1.
 
-**Guard files:** none (no new package). **Gate:** `docs/LANES.md` is a gate file, so a separate Security accept (D-137); `broker/kernel` and `broker/cmd/agentos-kernel` are trusted core, so the build PR names a one-row D-159 decision in its `Trusted-core:` line.
+**Guard files:** none (no new package). **Gate:** `docs/LANES.md` is a gate file, so a separate Security accept (D-137); `broker/kernel` and `broker/cmd/agentos-kernel` are trusted core, so the build PR names a one-row D-159 decision in a `trusted-core #<PR> -- <decision ID>` line it adds to `tools/trusted_base_reasons.txt`.
 
 ## Acceptance tests
 

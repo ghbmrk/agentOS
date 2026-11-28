@@ -26,6 +26,8 @@ def git(cwd, *args):
 
 ACTION = ROOT / ".github" / "actions" / "scope" / "action.yml"
 GUARD = "if: steps.scope.outputs.records != 'true'"
+# CI-race-scope: broker-race's steps skip on records and race-blind changes alike.
+RACE_GUARD = "if: steps.scope.outputs.race != 'skip'"
 SCOPE_STEP = ("      - uses: ./.github/actions/scope\n        id: scope\n        with:\n"
               "          push: {}\n")
 CHECKOUT_DEPTH0 = ("      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2\n"
@@ -93,14 +95,15 @@ def scope_repo(d, base_has_tool=True):
     if base_has_tool:
         (root / "tools" / "ci_scope.py").write_text((ROOT / "tools" / "ci_scope.py").read_text())
     (root / "LATER.md").write_text("a\n")
-    (root / "x.go").write_text("package x\n")
+    (root / "broker").mkdir()
+    (root / "broker" / "x.go").write_text("package x\n")
     git(d, "add", "-A")
     git(d, "commit", "-qm", "base")
     git(d, "checkout", "-qb", "pr")
     (root / "LATER.md").write_text("b\n")
     git(d, "commit", "-qam", "records")
     git(d, "checkout", "-q", "main")
-    (root / "x.go").write_text("package x // main moved on\n")
+    (root / "broker" / "x.go").write_text("package x // main moved on\n")
     git(d, "commit", "-qam", "main")
     git(d, "merge", "-q", "--no-ff", "-m", "test merge", "pr")
 
@@ -254,15 +257,16 @@ class ScopeTest(unittest.TestCase):
             self.assertIn(SCOPE_STEP.format("full # CI-mainguard"), jobs[job][2][1][0], job)
             for text, cond in steps:
                 # Guarded, the records-only step, a main-only step, or a document check.
-                self.assertTrue(cond in (GUARD[4:], "steps.scope.outputs.records == 'true'")
+                guard = RACE_GUARD if job == "broker-race" else GUARD
+                self.assertTrue(cond in (guard[4:], "steps.scope.outputs.records == 'true'")
                                 or cond is None and job == "checks"
                                 or cond.startswith("github.event_name == 'push' && github.ref == 'refs/heads/main'")
                                 or job == "checks" and cond.startswith("github.") and "records" not in cond,
                                 (job, text.splitlines()[0], cond))
         race = scoped_steps(jobs["broker-race"][2])
-        self.assertTrue(all(c and ("records != 'true'" in c or c.startswith("github.event_name == 'push'"))
+        self.assertTrue(all(c and (c == RACE_GUARD[4:] or c.startswith("github.event_name == 'push'"))
                             for _, c in race))
-        self.assertIn("go test -race", "".join(s for s, c in race if c == GUARD[4:]))
+        self.assertIn("go test -race", "".join(s for s, c in race if c == RACE_GUARD[4:]))
         # The action decides records-only from the PR's own diff.
         self.assertIn("pull_request) base=HEAD^1 head=HEAD^2 ;;", ACTION.read_text())
 
@@ -280,8 +284,9 @@ CI_PREAMBLE_LINES = [
     '  contents: read',
     'concurrency:',
     "  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && "
-    "format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
-    "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}",
+    "format('pr-{0}', github.event.pull_request.number) || "
+    "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'head' || format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ (startsWith(github.event_name, 'pull_request') || github.event_name == 'push' && github.ref == 'refs/heads/main') && github.run_attempt == 1 }}",
     'env:',
     '  GOTOOLCHAIN: local',
     '  GOWORK: "off"',
@@ -549,18 +554,18 @@ class WiringTest(unittest.TestCase):
         # CI-par-4: the action's own script, run on a test merge of a records-only branch.
         with tempfile.TemporaryDirectory() as d:
             scope_repo(d)
-            self.assertEqual(run_scope_action(d, "pull_request", "full"), "records=true\n")
-            self.assertEqual(run_scope_action(d, "pull_request", "scoped"), "records=true\n")
+            self.assertEqual(run_scope_action(d, "pull_request", "full"), "records=true\nrace=skip\n")
+            self.assertEqual(run_scope_action(d, "pull_request", "scoped"), "records=true\nrace=skip\n")
             before = git(d, "rev-parse", "HEAD^1").strip()
             # A push is scoped only where the caller asks for it (ci.yml: full, CI-mainguard).
             self.assertEqual(run_scope_action(d, "push", "full", before=before), "")
             self.assertEqual(run_scope_action(d, "push", "", before=before), "")
             # The pushed range is the merge alone: its first parent to it adds only the PR's change.
-            self.assertEqual(run_scope_action(d, "push", "scoped", before=before), "records=true\n")
+            self.assertEqual(run_scope_action(d, "push", "scoped", before=before), "records=true\nrace=skip\n")
             # From the base, the range also holds main's x.go change.
             self.assertEqual(run_scope_action(d, "push", "scoped", before=git(d, "rev-parse", "HEAD^1^").strip()), "")
             self.assertEqual(run_scope_action(d, "push", "scoped", before=git(d, "rev-parse", "HEAD^2^").strip(),
-                                              sha="HEAD^2"), "records=true\n")
+                                              sha="HEAD^2"), "records=true\nrace=skip\n")
             for event in ("merge_group", "schedule", ""):
                 self.assertEqual(run_scope_action(d, event, "scoped"), "", event)
 
@@ -572,7 +577,7 @@ class WiringTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             scope_repo(d)
             self.assertEqual(run_scope_action(d, "push", "scoped", before="0" * 40), "")
-            (pathlib.Path(d) / "x.go").write_text("package y\n")
+            (pathlib.Path(d) / "broker" / "x.go").write_text("package y\n")
             git(d, "commit", "-qam", "code")
             self.assertEqual(run_scope_action(d, "push", "scoped", before=git(d, "rev-parse", "HEAD^").strip()), "")
 

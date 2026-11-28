@@ -153,6 +153,14 @@ func TestPlanModelBodyHeldToDeclaredShape(t *testing.T) {
 			ns := it["tools"].([]any)[0].(map[string]any)
 			ns["tools"] = append(ns["tools"].([]any), map[string]any{"type": "namespace", "name": "functions", "tools": []any{}})
 		}), "tool"},
+		// Multi-agent v2's tools: the image's pinned model catalog turns
+		// them off (guest/codex ASSUMPTIONS B2-21-C22, #2111), so a CLI that still
+		// declares them is refused.
+		"the collaboration namespace": {mut(func(m map[string]any) {
+			it := item(m, 0)
+			it["tools"] = append(it["tools"].([]any), map[string]any{"type": "namespace", "name": "collaboration", "description": "",
+				"tools": []any{map[string]any{"type": "function", "name": "spawn_agent", "description": "d", "parameters": map[string]any{"type": "object"}}}})
+		}), "tool"},
 		"undeclared namespace": {mut(func(m map[string]any) {
 			it := item(m, 0)
 			it["tools"] = append(it["tools"].([]any), map[string]any{"type": "namespace", "name": "web", "tools": []any{}})
