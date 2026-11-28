@@ -111,6 +111,12 @@ func TestMutALocalRequestThatCannotBeSavedIsRefused(t *testing.T) {
 	if _, err := r.ch.RequestLocal(localItem("a"), 0); err == nil {
 		t.Fatal("opened")
 	}
+	// The refusal leaves the channel unlocked, so later calls do not wait
+	// on a lock it left held.
+	if !r.ch.mu.TryLock() {
+		t.Fatal("the channel stayed locked after a refused local request")
+	}
+	r.ch.mu.Unlock()
 }
 
 func TestMutARequestHoldsOneToTwentyItems(t *testing.T) {
