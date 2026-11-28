@@ -149,8 +149,34 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 		notice   bool   // the box's line sends recoveryNotice before its first reply
 		note     string // the step's note, "" for none
 		diag     bool   // a timeout, whose error carries modemDiag; a reply out of order carries none
+		lose     int    // the paired phone's first lose HELP texts never reach the box
+		probes   int    // HELP probes the step sent, 0 for any
+		// lateStranger answers the stranger once the barrier is answered
+		// and the driver's clock has moved 3 s on: a reply the settle read
+		// must catch.
+		lateStranger bool
 	}{
-		{name: "pass", st: owner.State{LastStep: step}, enrolled: true, done: true},
+		{name: "pass", st: owner.State{LastStep: step}, enrolled: true, done: true, note: "proved help-answered code-checked status-locked unpaired-ignored", probes: 1},
+		// The hand-over from setup can lose the owner's texts (E9): a lost
+		// HELP is sent again after 45 s, and the step passes on the retry.
+		{name: "first HELP lost, the retry answered", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			lose: 1, note: "proved help-answered code-checked status-locked unpaired-ignored", probes: 2},
+		// Every HELP lost: the probe gives up at the 3-minute deadline and
+		// names its attempts, on the driver's clock (#1883 item 3).
+		{name: "every HELP lost", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			lose: 1 << 20, want: "no reply to the paired number after 4 HELP attempts (BOARD P2-2w c4c r1", diag: true, probes: 4},
+		// A reply to the unpaired number that lands after the barrier's,
+		// while the step still reads the log, fails it.
+		{name: "stranger answered after the barrier", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			lateStranger: true, want: "1 text(s) went to the unpaired number"},
+		// HELP drawing anything but the help reply ends the probe at once.
+		{name: "HELP drew status", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			mutate: func(l *modem.Line, c *modem.Carrier, m modem.SMS) modem.SMS {
+				if m.From == phoneNum && m.Text == "HELP" && !answered(c.Log()) {
+					_ = l.Send(phoneNum, "Running.")
+				}
+				return m
+			}, want: "HELP drew status", probes: 1},
 		{name: "recovery notice passed over, noted and failed", st: owner.State{LastStep: step}, enrolled: true, done: true,
 			notice: true, want: "passed over 1 recovery notice(s)", note: "passed-over recovery notices=1 texts=2 requests=1|lost-send kind=request via=owner-channel-sendrequest"},
 		{name: "setup not finished", st: owner.State{LastStep: step}, enrolled: true, want: `setup not finished: GET /setup 200 "" at "7. AI"`},
@@ -219,12 +245,30 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 			if c.late {
 				box.hold = holdLate(ctx, carrier, clk)
 			}
+			if c.lateStranger {
+				go func() {
+					var since time.Time
+					for end := time.Now().Add(10 * time.Second); time.Now().Before(end) && ctx.Err() == nil; time.Sleep(time.Millisecond) {
+						if since.IsZero() && barrierAnswered(carrier.Log()) {
+							since = clk.now()
+						}
+						if !since.IsZero() && !clk.now().Before(since.Add(3*time.Second)) {
+							_ = line.Send(strangerNum, "Running.")
+							return
+						}
+					}
+				}()
+			}
 			go func() {
 				for {
 					select {
 					case <-ctx.Done():
 						return
 					case m := <-line.Inbox():
+						if c.lose > 0 && m.From == phoneNum && m.Text == "HELP" {
+							c.lose--
+							continue
+						}
 						if c.notice {
 							c.notice = false
 							_ = line.Send(phoneNum, recoveryNotice)
@@ -281,6 +325,9 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 			}
 			if got := strings.Join(notes, "|"); got != c.note {
 				t.Fatalf("notes %q, want %q", got, c.note)
+			}
+			if got := readPhoneRun(carrier.Log(), 0).probes; c.probes != 0 && got != c.probes {
+				t.Fatalf("%d HELP probes, want %d", got, c.probes)
 			}
 		})
 	}

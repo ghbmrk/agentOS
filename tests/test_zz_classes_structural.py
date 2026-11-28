@@ -39,6 +39,9 @@ LISTS = ("list", "line")  # the allow and exit classes
 PATHLIKE = re.compile(r"[\w.+-]+(?:/[\w.+-]+)*")  # a relative path: no space, no leading `/`
 # Each tool loads its own copy of record_merge (by path, for `python3 -I`); a test that drops a CLASSES entry
 # drops it from every copy.
+# Files a module names but never reads, with why. walk() leaves them out.
+NAMED_NOT_READ = {("ci_scope.py", "tools/old_core.txt"):
+                  "RACE_READ lists the files broker tests read (CI-race-scope, #6692); ci_scope reads none of them"}
 COPIES = {id(m.record_merge): m.record_merge for m in (assumptions_ids, doclint, hostcheck, netguardcheck, risk_tier,
                                                          srclint, trace, trusted_base, word_budget)} | {id(record_merge): record_merge}
 
@@ -71,7 +74,7 @@ def walk(root):
                 continue  # a message or pattern, not a repository path
             top = "/" not in v and (root / "tools" / v).is_file()
             f = f"tools/{v}" if top else v if v and (root / v).is_file() else None
-            if f and (record_merge.record_class(f) in LISTS or f.count("/") == 1 and f.startswith("tools/")
+            if f and (py.name, f) not in NAMED_NOT_READ and (record_merge.record_class(f) in LISTS or f.count("/") == 1 and f.startswith("tools/")
                       and not f.endswith(CODE)):
                 out.setdefault(py.name, set()).add(f)
     return out
