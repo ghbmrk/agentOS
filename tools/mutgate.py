@@ -1690,7 +1690,9 @@ def _order_risk(files, facts, decls, clause, outside):
 
 def _calls_nothing(bare):
     """Whether a package var declaration (its text, comments and literal contents blanked) runs no call
-    when initialized (#6687): no `(` but a func literal's or func type's own, gofmt's layout read. A func
+    and changes no state when initialized (#6687): no `(` but a func literal's or func type's own, and no
+    `<-` outside a func literal's body (a channel receive, the one Go expression that changes state
+    without a call; L3 on #6762), gofmt's layout read. A func
     literal is `func(params)`, results, then ` {` and its body; a func type is the same with no ` {`
     (`func() error{` opens a composite literal). Anything else with a `(` (a call, a conversion, a method
     expression, a called literal's `}(`) reads as a call."""
@@ -1716,7 +1718,7 @@ def _calls_nothing(bare):
             if (end := _closer(text, end + 1 + kind.end())) is None:  # a literal: its body runs later
                 return False
         text = text[:m.start()] + text[end + 1:]
-    return "(" not in text
+    return "(" not in text and "<-" not in text  # a receive takes a value another reader would get (#6762)
 
 
 def _order_seed(d, quals, specs, bare, refs, clause, outside):
@@ -2234,9 +2236,11 @@ def _quiet_vars(files, decls):
     """decls with every test-file package var whose initializer runs nothing read as an ordinary
     declaration, reached by the tests that name it (TOOL-mutgate-test-var-scope): its file in gofmt's
     layout, no linkname or cgo, no directive go reads package-wide on it, and its text (comments and
-    literal contents blanked) holding no `(` but a func literal's or func type's own (_calls_nothing,
-    #6687). Such an initializer runs no statement and changes no state before a test starts, and only
-    test code, which names it, can read what it holds. Any other initialized var stays every test."""
+    literal contents blanked) holding no `(` but a func literal's or func type's own and no receive
+    outside one's body (_calls_nothing, #6687). Such an initializer runs no statement and changes no
+    state before a test starts, and only test code, which names it, can read what it holds; what a
+    reached test later writes through it (an alias of another var) is the static-reach bound every
+    helper and test body has (MUT-test-helper-scope-1). Any other initialized var stays every test."""
     bare = {p: _uncommented(t, False) for p, t in files.items()}
     maybe = [i for i, d in enumerate(decls) if d[1] == "var" and d[5] and d[0].endswith("_test.go")
              and not _tied(files[d[0]]) and _calls_nothing(_decl_text(bare[d[0]], d))
