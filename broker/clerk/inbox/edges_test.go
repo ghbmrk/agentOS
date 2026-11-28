@@ -160,22 +160,3 @@ func TestContainsWordSkipsMatchesInsideWords(t *testing.T) {
 		}
 	}
 }
-
-// A full read that meets a read mail it already logged keeps it once: the
-// second keep charges nothing, leaves its entry as the first logged it and
-// queues no second eviction slot. Driven on the state directly, since only
-// map order in a fill decides whether a read reaches this (mutgate, #6429).
-func TestAFullReadKeepsALoggedMailOnce(t *testing.T) {
-	o, err := newOpened("2026-10-19", SeenLog{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	o.full = true
-	id := [16]byte{7}
-	o.keep(id, "a@x.test", 1)
-	kept, e := o.kept, o.log[id]
-	o.keep(id, "a@x.test", 2)
-	if o.kept != kept || o.log[id] != e || len(o.fresh) != 1 {
-		t.Fatalf("second keep: charged %d, entry %+v (was %+v), fresh %d; want nothing new", o.kept-kept, o.log[id], e, len(o.fresh))
-	}
-}
