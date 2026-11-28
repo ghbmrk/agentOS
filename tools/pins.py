@@ -68,7 +68,6 @@ FETCH_NOT_YET = {
 }
 # Files whose fetch sites are not pinned downloads: the count, and why.
 FETCH_EXEMPT = {
-    "broker/drone/sitl/build.sh": (1, "a pip install pinned by version only; hashes owed by #6588"),
     "image/security-snapshot.sh": (5, "probes which debian-security snapshot run is served; apt's signed "
                                       "InRelease is the authority for what it then installs"),
     "spikes/S4-openclaw-guest/run_gateway.sh": (2, "talks to a gateway on 127.0.0.1; downloads nothing"),
