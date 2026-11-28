@@ -22,64 +22,64 @@
 # as a glob that matches none does.
 
 # Shell and text tools, run locally.
-/usr/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f pkg=- ver=- syms=-
-/usr/bin/csplit sha256=6b492d1b227657b17c9f6fadf7eb75dac5fe804d9aadbc5e8e775c25f06ae8b7 pkg=- ver=- syms=-
-/usr/bin/du sha256=3c0b05db84b02f20521c548adbe76fe05012a24effa6116e0752a81dd0faa9ba pkg=- ver=- syms=-
-/usr/bin/expr sha256=b3a702318c52f2b29984e289cac19c4966e0dca953d7107aa73e3593feae739f pkg=- ver=- syms=-
-/usr/bin/find sha256=91b75e72c495e68dd6aab198c2fd6c458fd51a2dc361045ee31f8e657417de26 pkg=- ver=- syms=-
-/usr/bin/grep sha256=bd6686bf7a650a9717fd7e73fdb07dc63b70547a1da41bce093c56df937a66eb pkg=- ver=- syms=-
-/usr/bin/hardlink sha256=86a868c9029abdf3ae3a53534c390415f7f4ddc42a4759c187f8715f3791d8da pkg=- ver=- syms=-
-/usr/bin/kmod sha256=a775c12b9d71d9548654ff98ecc0e5e3378bdaccd52ccb62fa80a5f41e849caf pkg=- ver=- syms=-
-/usr/bin/less sha256=27dccb9e14cb983e7738289b71884c9776a4425a424c703dadffe5639d82d7f7 pkg=- ver=- syms=-
-/usr/bin/localedef sha256=4a7f91a8aec9ed05fd5b8f7e4e7d4eea733795dba6dc964d1aa3969878aaa823 pkg=- ver=- syms=-
-/usr/bin/more sha256=cac3eb3b2db220c2ab0d7c648c1e0d751f5402e35a948384e2d92f69b9c61f7a pkg=- ver=- syms=-
-/usr/bin/nl sha256=65b5cf1b0e28c06585b03d00db8d2732d0ec86bd42a59c0da6dfc7180817d20d pkg=- ver=- syms=-
-/usr/bin/ptx sha256=4ad329af0c827f032df7c57dc32f5852fa1eb4f81460da2abfbcc4c1198197e8 pkg=- ver=- syms=-
-/usr/bin/run-parts sha256=5470f76b78b478b3ef0c8cb72247fbb63700e4df32f2fd323c7bc286c6b6cace pkg=- ver=- syms=-
-/usr/bin/sed sha256=69ff7292c0d081bdf5866bc84dde96d5a14f4a7deafeb9483739be68c48ac2b3 pkg=- ver=- syms=-
-/usr/bin/tac sha256=995cb01180b93a1222cf4d42cdbcec004ec1a2401f87af409f78970bf12dba53 pkg=- ver=- syms=-
+/usr/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f pkg=bash ver=5.2.37-2+b10 syms=regcomp,regexec
+/usr/bin/csplit sha256=6b492d1b227657b17c9f6fadf7eb75dac5fe804d9aadbc5e8e775c25f06ae8b7 pkg=coreutils ver=9.7-3 syms=re_compile_pattern,re_search
+/usr/bin/du sha256=3c0b05db84b02f20521c548adbe76fe05012a24effa6116e0752a81dd0faa9ba pkg=coreutils ver=9.7-3 syms=regcomp,regexec
+/usr/bin/expr sha256=b3a702318c52f2b29984e289cac19c4966e0dca953d7107aa73e3593feae739f pkg=coreutils ver=9.7-3 syms=re_compile_pattern,re_match
+/usr/bin/find sha256=91b75e72c495e68dd6aab198c2fd6c458fd51a2dc361045ee31f8e657417de26 pkg=findutils ver=4.10.0-3 syms=re_compile_pattern,re_match,re_set_syntax,rpmatch
+/usr/bin/grep sha256=bd6686bf7a650a9717fd7e73fdb07dc63b70547a1da41bce093c56df937a66eb pkg=grep ver=3.11-4 syms=re_compile_pattern,re_match,re_search,re_set_syntax,regcomp,regexec
+/usr/bin/hardlink sha256=86a868c9029abdf3ae3a53534c390415f7f4ddc42a4759c187f8715f3791d8da pkg=util-linux ver=2.41.5-0+deb13u1 syms=regcomp,regexec
+/usr/bin/kmod sha256=a775c12b9d71d9548654ff98ecc0e5e3378bdaccd52ccb62fa80a5f41e849caf pkg=kmod ver=34.2-2 syms=regcomp,regexec
+/usr/bin/less sha256=27dccb9e14cb983e7738289b71884c9776a4425a424c703dadffe5639d82d7f7 pkg=- ver=- syms=re_compile_pattern,re_search,re_set_syntax
+/usr/bin/localedef sha256=4a7f91a8aec9ed05fd5b8f7e4e7d4eea733795dba6dc964d1aa3969878aaa823 pkg=libc-bin ver=2.41-12+deb13u5 syms=regcomp
+/usr/bin/more sha256=cac3eb3b2db220c2ab0d7c648c1e0d751f5402e35a948384e2d92f69b9c61f7a pkg=util-linux ver=2.41.5-0+deb13u1 syms=regcomp,regexec
+/usr/bin/nl sha256=65b5cf1b0e28c06585b03d00db8d2732d0ec86bd42a59c0da6dfc7180817d20d pkg=coreutils ver=9.7-3 syms=re_compile_pattern,re_search
+/usr/bin/ptx sha256=4ad329af0c827f032df7c57dc32f5852fa1eb4f81460da2abfbcc4c1198197e8 pkg=coreutils ver=9.7-3 syms=re_compile_fastmap,re_compile_pattern,re_match,re_search
+/usr/bin/run-parts sha256=5470f76b78b478b3ef0c8cb72247fbb63700e4df32f2fd323c7bc286c6b6cace pkg=debianutils ver=5.23.2 syms=regcomp,regexec
+/usr/bin/sed sha256=69ff7292c0d081bdf5866bc84dde96d5a14f4a7deafeb9483739be68c48ac2b3 pkg=sed ver=4.9-2+deb13u1 syms=re_compile_pattern,re_search,re_set_syntax
+/usr/bin/tac sha256=995cb01180b93a1222cf4d42cdbcec004ec1a2401f87af409f78970bf12dba53 pkg=coreutils ver=9.7-3 syms=re_compile_pattern,re_search
 
 # Tools that import only glibc's rpmatch, which runs the locale's YESEXPR on a yes/no answer to an
 # interactive prompt (cp -i, rm -i and the like).
-/usr/bin/cp sha256=5a3a8808bab81a67c6ac578670f5608595f1569948d4dc7d7d604c1d08d596d9 pkg=- ver=- syms=-
-/usr/bin/install sha256=daa4c9bda9ae0ebc3c778b7778c2634d85674690673facea20f6984b976f4e91 pkg=- ver=- syms=-
-/usr/bin/ln sha256=75bef899117adf42c64c2f15fee640755d18d4632ae0794578d268a74cc7af8b pkg=- ver=- syms=-
-/usr/bin/mv sha256=7db4661c6397fe5fd5ba6837692aa5adb7dce1efc656369d7b08dfd6ece525a0 pkg=- ver=- syms=-
-/usr/bin/rename.ul sha256=9b905a0ee4c15b50764f48a0629cf1d4d507818b273e93e03e6548f0e17d43e7 pkg=- ver=- syms=-
-/usr/bin/rm sha256=c959a237e7b95d229eea44764b2246fcb61a95dc679a10ad0cc97ad84c2316c1 pkg=- ver=- syms=-
+/usr/bin/cp sha256=5a3a8808bab81a67c6ac578670f5608595f1569948d4dc7d7d604c1d08d596d9 pkg=coreutils ver=9.7-3 syms=rpmatch
+/usr/bin/install sha256=daa4c9bda9ae0ebc3c778b7778c2634d85674690673facea20f6984b976f4e91 pkg=coreutils ver=9.7-3 syms=rpmatch
+/usr/bin/ln sha256=75bef899117adf42c64c2f15fee640755d18d4632ae0794578d268a74cc7af8b pkg=coreutils ver=9.7-3 syms=rpmatch
+/usr/bin/mv sha256=7db4661c6397fe5fd5ba6837692aa5adb7dce1efc656369d7b08dfd6ece525a0 pkg=coreutils ver=9.7-3 syms=rpmatch
+/usr/bin/rename.ul sha256=9b905a0ee4c15b50764f48a0629cf1d4d507818b273e93e03e6548f0e17d43e7 pkg=util-linux ver=2.41.5-0+deb13u1 syms=rpmatch
+/usr/bin/rm sha256=c959a237e7b95d229eea44764b2246fcb61a95dc679a10ad0cc97ad84c2316c1 pkg=coreutils ver=9.7-3 syms=rpmatch
 
 # The guests' bash, an agent-driven shell inside the guest sandbox, and their rm (rpmatch), both
 # linking the guest's own glibc (the image/guest -100290 record).
-/usr/lib/agentos/images/*/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f pkg=- ver=- syms=-
-/usr/lib/agentos/images/*/bin/rm sha256=c959a237e7b95d229eea44764b2246fcb61a95dc679a10ad0cc97ad84c2316c1 pkg=- ver=- syms=-
+/usr/lib/agentos/images/*/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f pkg=bash ver=5.2.37-2+b10 syms=regcomp,regexec
+/usr/lib/agentos/images/*/bin/rm sha256=c959a237e7b95d229eea44764b2246fcb61a95dc679a10ad0cc97ad84c2316c1 pkg=coreutils ver=9.7-3 syms=rpmatch
 
 # The openclaw guest's libcua_driver_sdk.so (@trycua/cua-driver-linux-x64-gnu 0.32.0, Rust) imports dlsym
 # (Rust std's weak symbols, fixed names) and ends strings with "re_exec": both are in .strtab, the symbol
 # table no loader maps, as the Rust names regorus::builtins::glob::make_glob and std's Command::pre_exec,
 # so no lookup can pass them. It also never loads in the guest: it needs libX11, libXi and libxkbcommon,
 # which the guest does not ship ([unresolved] below).
-/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@trycua/cua-driver-linux-x64-gnu/libcua_driver_sdk.so sha256=eca8cf7669d0de73e56fb8e7481d219f08fe27a70fab17963431fc951736c49d pkg=- ver=- syms=-
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@trycua/cua-driver-linux-x64-gnu/libcua_driver_sdk.so sha256=eca8cf7669d0de73e56fb8e7481d219f08fe27a70fab17963431fc951736c49d pkg=- ver=- syms=re_exec
 
 # libsmartcols (filters, and rpmatch) and the util-linux tools that need it (findmnt, lsblk, losetup,
 # swapon and the rest); fdisk, sfdisk and cfdisk also import rpmatch for their prompts.
-/usr/lib/x86_64-linux-gnu/libsmartcols.so.1.* sha256=f97455584112dae5d2594ca9a771af006343088444ca1d62a02329eb51534c47 pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/libsmartcols.so.1.* sha256=f97455584112dae5d2594ca9a771af006343088444ca1d62a02329eb51534c47 pkg=libsmartcols1 ver=2.41.5-0+deb13u1 syms=regcomp,regexec,rpmatch
 via /usr/lib/x86_64-linux-gnu/libsmartcols.so.1.*
-/usr/sbin/cfdisk sha256=45b294629cb6defce3d22f98d66baef461396c850432c32853ec40586f0d1899 pkg=- ver=- syms=-
-/usr/sbin/fdisk sha256=910e5fb24f50760c3342e0011bfca6c04ffd98126dc4ec930bafcb03db840236 pkg=- ver=- syms=-
-/usr/sbin/sfdisk sha256=d0cfef56b8bd47f19e2ec6b73836f89b0d3d4956233eeff4f32ae03dfa4e8919 pkg=- ver=- syms=-
+/usr/sbin/cfdisk sha256=45b294629cb6defce3d22f98d66baef461396c850432c32853ec40586f0d1899 pkg=fdisk ver=2.41.5-0+deb13u1 syms=rpmatch
+/usr/sbin/fdisk sha256=910e5fb24f50760c3342e0011bfca6c04ffd98126dc4ec930bafcb03db840236 pkg=fdisk ver=2.41.5-0+deb13u1 syms=rpmatch
+/usr/sbin/sfdisk sha256=d0cfef56b8bd47f19e2ec6b73836f89b0d3d4956233eeff4f32ae03dfa4e8919 pkg=fdisk ver=2.41.5-0+deb13u1 syms=rpmatch
 
 # libcryptsetup (its one regcomp parses FileVault2 metadata) and what needs it: its token plugins,
 # systemd's cryptsetup, cryptenroll, integritysetup and veritysetup, and cryptsetup's own tools.
-/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.* sha256=3fdc2e4c8c0e05bb85a446d96b7407a4ba2eda2d25e3ab24379d2ca2e063e2d3 pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.* sha256=3fdc2e4c8c0e05bb85a446d96b7407a4ba2eda2d25e3ab24379d2ca2e063e2d3 pkg=libcryptsetup12 ver=2:2.7.5-2 syms=regcomp,regexec,step
 via /usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.*
 
 # libedit (line editing) and nft, which needs it for its interactive mode; nft itself is a one-shot
 # ruleset load.
-/usr/lib/x86_64-linux-gnu/libedit.so.2.* sha256=4cde661dc336a1a835e605532086c629f6279a312374c91795215b8489ad4bcf pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/libedit.so.2.* sha256=4cde661dc336a1a835e605532086c629f6279a312374c91795215b8489ad4bcf pkg=libedit2 ver=3.1-20250104-1 syms=regcomp,regexec
 via /usr/lib/x86_64-linux-gnu/libedit.so.2.*
 
 # libformw (ncurses forms); nothing in the image needs it.
-/usr/lib/x86_64-linux-gnu/libformw.so.6.* sha256=10b2e85c3e0ebb8ebc6ef72892260bbede80bfaa4a89ecee6019513d879a25de pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/libformw.so.6.* sha256=10b2e85c3e0ebb8ebc6ef72892260bbede80bfaa4a89ecee6019513d879a25de pkg=libncursesw6 ver=6.5+20250216-2 syms=regcomp,regexec
 
 [glob]
 # The files of the built image (main tree and initrds) that may import or reach glibc's glob(), glob64 or
@@ -95,7 +95,7 @@ via /usr/lib/x86_64-linux-gnu/libedit.so.2.*
 # condition on its command line; systemd-sysctl and systemd-tmpfiles for sysctl.d and tmpfiles.d
 # entries; journalctl for --file. Each pattern is root-owned configuration (no agentOS process
 # starts a transient unit) or the command line of a root tool; none comes from the network or a guest.
-/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so sha256=9f6f06ff4883d23eee5e628c625878e8bc7f60613e945e04ead7793ae969f37c pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so sha256=9f6f06ff4883d23eee5e628c625878e8bc7f60613e945e04ead7793ae969f37c pkg=libsystemd-shared ver=257.13-1~deb13u1 syms=glob,glob64
 
 # The files that reach glob() only through libsystemd-shared (systemctl, journald, logind, resolved,
 # networkd, udevd's helpers, the generators, libsystemd-core, the cryptsetup token plugins and the rest);
@@ -106,34 +106,34 @@ via /usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so
 # shopt names extglob, nullglob, failglob, dotglob, nocaseglob and noglob). Its only dlsym calls are
 # enable -f's (builtins/enable.def dyn_load_builtin, bash 5.2), which look up NAME_struct,
 # NAME_builtin_load and NAME_builtin_unload, no glob() name; it expands patterns with its own lib/glob.
-/usr/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f pkg=- ver=- syms=-
-/usr/lib/agentos/images/*/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f pkg=- ver=- syms=-
+/usr/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f pkg=bash ver=5.2.37-2+b10 syms=glob
+/usr/lib/agentos/images/*/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f pkg=bash ver=5.2.37-2+b10 syms=glob
 
 # iproute2's ip: its one glob() (ip/iptuntap.c, 6.15) walks the fixed pattern /proc/[0-9]*/fd/[0-9]*
 # for "ip tuntap show".
-/usr/bin/ip sha256=024784c6d16b183dc7c97d93a943a9270976f167f95f771e14d72442dc657f0c pkg=- ver=- syms=-
+/usr/bin/ip sha256=024784c6d16b183dc7c97d93a943a9270976f167f95f771e14d72442dc657f0c pkg=iproute2 ver=6.15.0-1 syms=glob64
 
 # libnftables globs an "include" path in a ruleset. nft loads only rulesets agentOS renders (port1's
 # fixed set commands and a name matching [a-zA-Z0-9_.-], the enforcer's tables) or root-owned files;
 # none holds an include.
-/usr/lib/x86_64-linux-gnu/libnftables.so.1.* sha256=86b9679e5c020a6a77b516d9d81f4dbbfbd6254269ee2dea34f7f1724b17af6f pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/libnftables.so.1.* sha256=86b9679e5c020a6a77b516d9d81f4dbbfbd6254269ee2dea34f7f1724b17af6f pkg=libnftables1 ver=1.1.3-1 syms=glob
 via /usr/lib/x86_64-linux-gnu/libnftables.so.1.*
 
 # libpopt globs only in its config readers (poptReadConfigFiles, poptReadDefaultConfig and poptInit,
 # src/poptconfig.c); cryptsetup 2.7.5's tools call none of them.
-/usr/lib/x86_64-linux-gnu/libpopt.so.0.* sha256=f17e0e11908c7ce3a54c7e24ef99b8a571e410c78c3ac1d3abdca94d11152e41 pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/libpopt.so.0.* sha256=f17e0e11908c7ce3a54c7e24ef99b8a571e410c78c3ac1d3abdca94d11152e41 pkg=libpopt0 ver=1.19+dfsg-2 syms=glob
 via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 
 # PAM modules globbing their own root-owned config directories (/etc/security/access.d, limits.d and
 # namespace.d); a module runs only in a process that loads PAM, and its patterns are fixed paths.
-/usr/lib/x86_64-linux-gnu/security/pam_access.so sha256=d0274c0e50f83ee538cd0ee78b4c13739106075fe837e80be713ac38e6f37574 pkg=- ver=- syms=-
-/usr/lib/x86_64-linux-gnu/security/pam_limits.so sha256=30ced4e077edbefac25b4ed816733c487a1be087d8db98ca69f6bd8353de59e2 pkg=- ver=- syms=-
-/usr/lib/x86_64-linux-gnu/security/pam_namespace.so sha256=88dbb862c28ee158cd949b7e99cc852ddce107776c17c0210fb0b4f47eebc3be pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/security/pam_access.so sha256=d0274c0e50f83ee538cd0ee78b4c13739106075fe837e80be713ac38e6f37574 pkg=libpam-modules ver=1.7.0-5 syms=glob
+/usr/lib/x86_64-linux-gnu/security/pam_limits.so sha256=30ced4e077edbefac25b4ed816733c487a1be087d8db98ca69f6bd8353de59e2 pkg=libpam-modules ver=1.7.0-5 syms=glob
+/usr/lib/x86_64-linux-gnu/security/pam_namespace.so sha256=88dbb862c28ee158cd949b7e99cc852ddce107776c17c0210fb0b4f47eebc3be pkg=libpam-modules ver=1.7.0-5 syms=glob
 
 # ldconfig, a static copy of glibc (#6298), in the main tree and the initrd: its one glob() expands the
 # include patterns of root-owned /etc/ld.so.conf and ld.so.conf.d (elf/ldconfig.c), run by root at
 # package install and boot. It is also the sweep's control that the static scan still reads glibc's marks.
-/usr/sbin/ldconfig sha256=12ada6f9710fa5a5100f6c610a6547efb882eba2a82d07249a1b6c3c9e02e587 pkg=- ver=- syms=-
+/usr/sbin/ldconfig sha256=12ada6f9710fa5a5100f6c610a6547efb882eba2a82d07249a1b6c3c9e02e587 pkg=libc-bin ver=2.41-12+deb13u5 syms=glob
 
 # The openclaw guest's node imports dlsym and holds "glob" (#6298): the string is the name of its
 # JavaScript fs.glob API, implemented in JavaScript over readdir (lib/internal/fs/glob.js), and its
@@ -142,14 +142,14 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # node_api_module_get_api_version_v1, gnu_get_libc_version, memfd_create and pthread_setname_np. It runs
 # inside the guest sandbox, on the guest's own glibc (the image/guest -126765 record). The pin keys that
 # reading to this node build: another version's dlsym calls are read again before it passes (#6299).
-/usr/lib/agentos/images/openclaw/usr/local/bin/node sha256=a7ec1b37e6ff9d187e4198c5b6df9a4eb1c74dd31804fb3bac55cc4ceca1ac01 pkg=- ver=- syms=-
+/usr/lib/agentos/images/openclaw/usr/local/bin/node sha256=a7ec1b37e6ff9d187e4198c5b6df9a4eb1c74dd31804fb3bac55cc4ceca1ac01 pkg=- ver=- syms=glob
 
 # The openclaw guest's libcua_driver_sdk.so (@trycua/cua-driver-linux-x64-gnu 0.32.0, Rust) imports dlsym
 # (Rust std's weak symbols, fixed names) and ends strings with "glob": both are in .strtab, the symbol
 # table no loader maps, as the Rust names regorus::builtins::glob::make_glob and std's Command::pre_exec,
 # so no lookup can pass them. It also never loads in the guest: it needs libX11, libXi and libxkbcommon,
 # which the guest does not ship ([unresolved] below).
-/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@trycua/cua-driver-linux-x64-gnu/libcua_driver_sdk.so sha256=eca8cf7669d0de73e56fb8e7481d219f08fe27a70fab17963431fc951736c49d pkg=- ver=- syms=-
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@trycua/cua-driver-linux-x64-gnu/libcua_driver_sdk.so sha256=eca8cf7669d0de73e56fb8e7481d219f08fe27a70fab17963431fc951736c49d pkg=- ver=- syms=glob
 
 [wrapper]
 # Libraries that import dlsym or dlvsym and pass it only names of their own, never a caller's string
@@ -161,19 +161,19 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # libsystemd-shared (systemd 257): dlsym_many_or_warn (src/basic/dlfcn-util.c) resolves the
 # DLSYM_ARG(name) list its callers spell (idn-util.c, bpf-dlopen.c, cryptsetup-util.c and the other
 # *-util.c loaders), userdb.c looks up "_nss_systemd_block", and tpm2-util.c TSS2_TCTI_INFO_SYMBOL.
-/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so sha256=9f6f06ff4883d23eee5e628c625878e8bc7f60613e945e04ead7793ae969f37c pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so sha256=9f6f06ff4883d23eee5e628c625878e8bc7f60613e945e04ead7793ae969f37c pkg=libsystemd-shared ver=257.13-1~deb13u1 syms=dlsym
 
 # libpam (Linux-PAM 1.7.0): pam_handlers.c _load_module resolves the pam_sm_* names its switch spells
 # through _pam_dlsym (pam_dynamic.c), which libpam does not export.
-/usr/lib/x86_64-linux-gnu/libpam.so.0.* sha256=7e61037c89b06382c9d22518174914fef77b9e473962f49ab1c90c55c9b5bca2 pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/libpam.so.0.* sha256=7e61037c89b06382c9d22518174914fef77b9e473962f49ab1c90c55c9b5bca2 pkg=libpam0g ver=1.7.0-5 syms=dlsym
 
 # libselinux (3.8.1): load_policy.c resolves ten sepol_* names it spells from libsepol; nothing else
 # calls dlsym, and it exports no wrapper.
-/usr/lib/x86_64-linux-gnu/libselinux.so.1 sha256=5cb5293b4e7590463b94f7b23152d54807a6a2ccaf8cac9e343908c6692c086c pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/libselinux.so.1 sha256=5cb5293b4e7590463b94f7b23152d54807a6a2ccaf8cac9e343908c6692c086c pkg=libselinux1 ver=3.8.1-1 syms=dlsym
 
 # libmount (util-linux 2.41.5): hook_veritydev.c resolves the crypt_* names of its static
 # verity_symbols table from libcryptsetup; it exports no wrapper.
-/usr/lib/x86_64-linux-gnu/libmount.so.1.* sha256=1654d2cf948e3608cc0d38340807d4ddac1114315a3a77f7b274c4c859cb2181 pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/libmount.so.1.* sha256=1654d2cf948e3608cc0d38340807d4ddac1114315a3a77f7b274c4c859cb2181 pkg=libmount1 ver=2.41.5-0+deb13u1 syms=dlsym
 
 # libcrypto (OpenSSL 3.5.9): dlfcn_bind_func and dlfcn_globallookup (crypto/dso/dso_dlfcn.c) are its
 # only dlsym calls. A caller's name reaches them only through the exports DSO_bind_func,
@@ -181,7 +181,7 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # (LOOKUP_FUNCS); libcrypto's own callers spell fixed names (provider_core.c OSSL_provider_init,
 # eng_dyn.c v_check and bind_engine, conf_mod.c OPENSSL_init and OPENSSL_finish, the comp/ loaders,
 # rand_unix.c getentropy).
-/usr/lib/x86_64-linux-gnu/libcrypto.so.3 sha256=a4e00ad0bb09d820ba5c41672567e965d4ca03153f7842751ef243355a569805 pkg=- ver=- syms=-
+/usr/lib/x86_64-linux-gnu/libcrypto.so.3 sha256=a4e00ad0bb09d820ba5c41672567e965d4ca03153f7842751ef243355a569805 pkg=libssl3t64 ver=3.5.9-1~deb13u1 syms=dlsym
 
 [unresolved]
 # Files with a NEEDED name that no file or symbolic link of their place answers to (Security R4 on #6382),
@@ -190,15 +190,15 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 
 # pi-tui's X11 platform addons: the arm64 build is another architecture's, and the x64 build needs
 # libxcb, which the guest does not ship, so dlopen of either fails and none of its code runs.
-/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@earendil-works/pi-tui/native/linux/prebuilds/linux-arm64/linux-platform-x11.node sha256=63d4545349a25b5c97e352ea6d254cea50ff3c14161212ad3ddb3fc28022ddb5 pkg=- ver=- syms=-
-/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@earendil-works/pi-tui/native/linux/prebuilds/linux-x64/linux-platform-x11.node sha256=522d2550f7fa5d0d5bd204f45983f786ce2be9cf80f27f00179640d31d0689d6 pkg=- ver=- syms=-
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@earendil-works/pi-tui/native/linux/prebuilds/linux-arm64/linux-platform-x11.node sha256=63d4545349a25b5c97e352ea6d254cea50ff3c14161212ad3ddb3fc28022ddb5 pkg=- ver=- syms=libxcb.so.1
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@earendil-works/pi-tui/native/linux/prebuilds/linux-x64/linux-platform-x11.node sha256=522d2550f7fa5d0d5bd204f45983f786ce2be9cf80f27f00179640d31d0689d6 pkg=- ver=- syms=libxcb.so.1
 # koffi's musl build needs musl's libc, which the guest (glibc) does not ship.
-/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@koromix/koffi-linux-x64/musl_x64/koffi.node sha256=2df33bea84a018e03403360c8592af657a32bf394b0097dc7aa23defefd5885a pkg=- ver=- syms=-
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@koromix/koffi-linux-x64/musl_x64/koffi.node sha256=2df33bea84a018e03403360c8592af657a32bf394b0097dc7aa23defefd5885a pkg=- ver=- syms=libc.musl-x86_64.so.1
 # node-pty's prebuilt addon needs libutil.so.1: image/guest-userland.sh copies only the libraries of the
 # programs it is given (node, not this addon), so the guest has no libutil.so.1 and dlopen of it fails.
-/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@lydell/node-pty-linux-x64/prebuilds/linux-x64/pty.node sha256=123792d8f22f36d519b21dfb6f4b716f9b18b9e579085ea2840d0773d88d35fd pkg=- ver=- syms=-
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@lydell/node-pty-linux-x64/prebuilds/linux-x64/pty.node sha256=123792d8f22f36d519b21dfb6f4b716f9b18b9e579085ea2840d0773d88d35fd pkg=- ver=- syms=libutil.so.1
 # libcua_driver_sdk.so needs libX11, libXi and libxkbcommon, which the guest does not ship.
-/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@trycua/cua-driver-linux-x64-gnu/libcua_driver_sdk.so sha256=eca8cf7669d0de73e56fb8e7481d219f08fe27a70fab17963431fc951736c49d pkg=- ver=- syms=-
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@trycua/cua-driver-linux-x64-gnu/libcua_driver_sdk.so sha256=eca8cf7669d0de73e56fb8e7481d219f08fe27a70fab17963431fc951736c49d pkg=- ver=- syms=libX11.so.6,libXi.so.6,libxkbcommon.so.0
 
 [cipher]
 # The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher
