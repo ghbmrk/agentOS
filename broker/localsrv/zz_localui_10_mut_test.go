@@ -97,3 +97,15 @@ func TestMut10NewSetupDefaultsTheClock(t *testing.T) {
 		t.Errorf("the default clock reads %v from time.Now", d)
 	}
 }
+
+// A RESUME code of exactly MaxCode characters is a code to check, not bad
+// args.
+func TestMut10ResumeTakesACodeOfTheMaximumLength(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	r.now = r.now.Add(localapi.FreshFor + time.Minute)
+	out, err := r.call(localapi.OpResume, localapi.Resume{Token: tok, Code: strings.Repeat("7", localapi.MaxCode)})
+	if a, _ := out.(localapi.Answered); err != nil || a.Refusal != localapi.RefusedWrongCode {
+		t.Errorf("a %d-character code: %+v, %v; want a wrong-code refusal", localapi.MaxCode, out, err)
+	}
+}
