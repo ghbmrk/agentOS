@@ -48,7 +48,7 @@ func TestQuestionsRunInAgentosd(t *testing.T) {
 	}
 	// Until the guard opens, STATUS says the time check is not running
 	// (#1246).
-	if l := qs.Clock(); !strings.HasPrefix(l, "Time check: not running") {
+	if l := qs.Clock(); l != clockNotRunning {
 		t.Fatalf("clock line before the guard opened: %q", l)
 	}
 	if err := qs.open(ctx, d, &preempter{}, defaultQuestionConfig(dir)); err != nil {
@@ -141,13 +141,13 @@ func TestStatusShowsAnUnreadableClockRestriction(t *testing.T) {
 	if err := qs.open(ctx, d, &preempter{}, qc); err != nil {
 		t.Fatal(err)
 	}
-	if l := qs.Clock(); !strings.HasPrefix(l, "Time check: restricted since") || !strings.Contains(l, "saved check unreadable") {
+	if l := qs.Clock(); !strings.HasPrefix(l, "Time check: saved check unreadable since") {
 		t.Fatalf("STATUS clock line: %q", l)
 	}
 }
 
 // UX-98-1: STATUS shows the time check only for exceptions. Agreement adds
-// nothing; a restriction, a hold and every degraded check stay visible.
+// nothing; a disagreement, a hold and every degraded check stay visible.
 func TestClockLineOnlyForExceptions(t *testing.T) {
 	if l := clockLine(clock.Status{State: clock.Agreed}, time.UTC); l != "" {
 		t.Fatalf("agreed: %q", l)
@@ -164,10 +164,10 @@ func TestClockLineOnlyForExceptions(t *testing.T) {
 // CLOCK-guard-own (#1246): the box clock guard is its own dependency. A
 // question store that fails to load, or no owner channel, leaves the
 // guard open, so STATUS still reads it; a guard that never opened reads
-// as restricted.
+// as not running.
 func TestTheClockGuardOutlivesAQuestionStoreFailure(t *testing.T) {
 	var unopened questions
-	if l := unopened.Clock(); !strings.HasPrefix(l, "Time check: not running (time-sensitive checks restricted)") {
+	if l := unopened.Clock(); l != clockNotRunning {
 		t.Fatalf("STATUS clock line with no guard: %q", l)
 	}
 
@@ -189,7 +189,7 @@ func TestTheClockGuardOutlivesAQuestionStoreFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 		qc := defaultQuestionConfig(dir)
-		// An unreadable saved check restricts the guard until phone-network
+		// An unreadable saved check keeps the guard disagreeing until phone-network
 		// time agrees, which here is never; the question store is corrupt.
 		for _, p := range []string{qc.ClockPath, qc.Path} {
 			if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
@@ -207,10 +207,10 @@ func TestTheClockGuardOutlivesAQuestionStoreFailure(t *testing.T) {
 		if qs.g.Load() == nil {
 			t.Fatalf("ownerless %v: the clock guard did not open", ownerless)
 		}
-		if !qs.g.Load().Status().Restricted() {
-			t.Fatalf("ownerless %v: the guard's restriction did not hold", ownerless)
+		if qs.g.Load().Status().State != clock.Disagree {
+			t.Fatalf("ownerless %v: the guard's disagreement did not hold", ownerless)
 		}
-		if l := qs.Clock(); !strings.HasPrefix(l, "Time check: restricted since") {
+		if l := qs.Clock(); !strings.HasPrefix(l, "Time check: saved check unreadable since") {
 			t.Fatalf("ownerless %v: STATUS clock line: %q", ownerless, l)
 		}
 		cancel()
