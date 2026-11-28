@@ -169,7 +169,8 @@ func OpenGmail(base, token string, grant []byte, guard *netguard.Policy, roots *
 // read back before it counts. Gmail's API never marks a mail read on a get.
 type Gmail struct {
 	api    *clerk.API
-	poster *Poster // nil, unless WithPoster: unsubscribes are refused (no-poster)
+	poster *Poster    // nil, unless WithPoster: unsubscribes are refused (no-poster)
+	reads  *ReadCache // the read mail Opened got before (#3010); nil gets every one
 
 	mu     sync.Mutex
 	refs   map[string]string // the clerk's mail id to Gmail's message id
@@ -179,7 +180,7 @@ type Gmail struct {
 // NewGmail is a mailbox over api, which must be built from GmailCalls. It
 // has no Poster, so its unsubscribes are refused until WithPoster.
 func NewGmail(api *clerk.API) *Gmail {
-	return &Gmail{api: api, refs: map[string]string{}, labels: map[string]string{}}
+	return &Gmail{api: api, reads: NewReadCache(), refs: map[string]string{}, labels: map[string]string{}}
 }
 
 // WithPoster gives g a Poster on guard, the clerk's home-network policy, and
@@ -651,9 +652,11 @@ func (g *Gmail) Opened(ctx context.Context, today string, log SeenLog) (map[stri
 	if err != nil {
 		return nil, SeenLog{}, err
 	}
+	pass := g.reads.pass()
 	page := ""
 	for n := 0; ; n++ {
 		if n == gPagesMax {
+			pass.end(false)
 			return nil, o.partial(), errors.New("inbox: gmail: a listing of read mail that does not end")
 		}
 		var l struct {
@@ -667,25 +670,37 @@ func (g *Gmail) Opened(ctx context.Context, today string, log SeenLog) (map[stri
 			name, args = gReadNext, map[string]string{"page": page}
 		}
 		if _, err := g.call(ctx, name, args, &l); err != nil {
+			pass.end(false)
 			return nil, o.partial(), err
 		}
 		for _, m := range l.Messages {
 			if !gmailID.MatchString(m.ID) {
+				pass.end(false)
 				return nil, o.partial(), errors.New("inbox: gmail: a message id outside Gmail's form")
 			}
-			var h gHeaders
-			ans, bad := g.api.Call(ctx, gMetadata, map[string]string{"id": m.ID})
-			if bad == "" && ans.Status == http.StatusNotFound {
-				continue
+			r, ok := g.reads.get(m.ID)
+			if !ok {
+				var h gHeaders
+				ans, bad := g.api.Call(ctx, gMetadata, map[string]string{"id": m.ID})
+				if bad == "" && ans.Status == http.StatusNotFound {
+					continue
+				}
+				if _, err := g.decodeInto(ans, bad, &h); err != nil {
+					pass.end(false)
+					return nil, o.partial(), err
+				}
+				raw, arrived, err := h.header()
+				if h.ID != m.ID || err != nil {
+					pass.end(false)
+					return nil, o.partial(), errors.New("inbox: gmail: a read mail's headers that do not decode")
+				}
+				r = cachedRead{raw: g.api.RedactToken(raw), arrived: arrived}
 			}
-			if _, err := g.decodeInto(ans, bad, &h); err != nil {
-				return nil, o.partial(), err
-			}
-			raw, arrived, err := h.header()
-			if h.ID != m.ID || err != nil {
-				return nil, o.partial(), errors.New("inbox: gmail: a read mail's headers that do not decode")
-			}
-			if err := o.header(g.api.RedactToken(raw), arrived); err != nil {
+			pass.keep(m.ID, r)
+			// Redacted again: a cached header was redacted of the token
+			// of its own time.
+			if err := o.header(g.api.RedactToken(r.raw), r.arrived); err != nil {
+				pass.end(false)
 				return nil, o.partial(), err
 			}
 		}
@@ -694,6 +709,7 @@ func (g *Gmail) Opened(ctx context.Context, today string, log SeenLog) (map[stri
 		}
 		page = l.Next
 	}
+	pass.end(true)
 	if o.full {
 		return nil, o.partial(), o.tooMuch()
 	}

@@ -439,7 +439,7 @@ func TestAGiveBackWaitsForTheHostsLock(t *testing.T) {
 		t.Fatal("giveBack returned while h.mu was held")
 	default:
 	}
-	early := slices.ContainsFunc(h.notices, func(n notice) bool { return n.text == noteGmailKept })
+	early := slices.ContainsFunc(h.notices, func(n notice) bool { return keptText(n.text) })
 	h.mu.Unlock()
 	if early {
 		t.Fatal("the owner was told while h.mu was held")
@@ -452,7 +452,7 @@ func TestAGiveBackWaitsForTheHostsLock(t *testing.T) {
 		t.Fatal("giveBack did not return within the return timeout of h.mu's release")
 	}
 	h.mu.Lock()
-	told := slices.ContainsFunc(h.notices, func(n notice) bool { return n.text == noteGmailKept })
+	told := slices.ContainsFunc(h.notices, func(n notice) bool { return keptText(n.text) })
 	h.mu.Unlock()
 	if !told {
 		t.Fatal("the grant Google kept was not told")
@@ -839,7 +839,7 @@ func TestReplacingOrRemovingGmailRevokesItsGrantFirst(t *testing.T) {
 		if !slices.Equal(srv.Revoked(), []string{gmailtest.Refresh}) || sec.Has(GmailSlot(gmailtest.User)) {
 			t.Fatalf("revoked %v; Gmail slot kept %v", srv.Revoked(), sec.Has(GmailSlot(gmailtest.User)))
 		}
-		if st, _ := owner.Status(); slices.Contains(st.Notices, noteGmailKept) {
+		if st, _ := owner.Status(); slices.ContainsFunc(st.Notices, keptText) {
 			t.Fatalf("a revoked grant was told as kept: %+v", st)
 		}
 	})
@@ -864,7 +864,7 @@ func TestReplacingOrRemovingGmailRevokesItsGrantFirst(t *testing.T) {
 			t.Fatalf("RemoveMail = %v with %d slots", err, sec.Len())
 		}
 		st, _ := owner.Status()
-		if !slices.Contains(st.Notices, noteGmailKept) || !strings.Contains(noteGmailKept, "myaccount.google.com/permissions") {
+		if !slices.ContainsFunc(st.Notices, keptText) || !strings.Contains(noteGmailKept, "myaccount.google.com/permissions") {
 			t.Fatalf("notices = %v; want the kept grant told with its step", st.Notices)
 		}
 	})
@@ -938,7 +938,8 @@ func TestASignInForAnotherAddressRevokesTheOldGrantFirst(t *testing.T) {
 		if kept {
 			c.gmail.revoke = srv.Base() + "/revoke" // answers 401
 		}
-		owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, c), MailOwnerSide)}
+		h := NewMailHost(context.Background(), dir, sec, c)
+		owner := MailOwner{serveMail(t, h, MailOwnerSide)}
 		srv.As(other)
 		if d := signIn(t, srv, owner, "watch", fakeClient); d != clerk.DSignedIn+" watch" {
 			t.Fatalf("kept %v: GmailFinish = %q", kept, d)
@@ -949,8 +950,16 @@ func TestASignInForAnotherAddressRevokesTheOldGrantFirst(t *testing.T) {
 		}
 		revoked := slices.Equal(srv.Revoked(), []string{gmailtest.Refresh})
 		st, _ := owner.Status()
-		if revoked == kept || slices.Contains(st.Notices, noteGmailKept) != kept || !slices.Contains(st.Notices, noteMailReplaced) {
+		if revoked == kept || slices.ContainsFunc(st.Notices, keptText) != kept || !slices.Contains(st.Notices, noteMailReplaced) {
 			t.Fatalf("kept %v: revoked %v, notices %v", kept, srv.Revoked(), st.Notices)
+		}
+		if kept {
+			// The old account's grant was kept: the notice names it and warns
+			// off the new account set up here (#6633 UX 2 point 1).
+			safeFor(t, h, other)
+			if ns := keptNotices(h); !strings.Contains(ns[0], "signed in to "+gmailtest.User) {
+				t.Fatalf("the kept old grant's notice does not name its account: %q", ns[0])
+			}
 		}
 	}
 }
@@ -1019,7 +1028,7 @@ func TestASignInAgainAsAnotherAccountGivesTheOldGrantBack(t *testing.T) {
 	}
 	st, _ := owner.Status()
 	if a, _ := owner.Account(); a.Settings.Address != "other@gmail.test" || sec.Len() != 1 || !sec.Has(GmailSlot("other@gmail.test")) ||
-		!slices.Equal(srv.Revoked(), []string{gmailtest.Refresh}) || slices.Contains(st.Notices, noteGmailKept) || !slices.Contains(st.Notices, noteMailReplaced) {
+		!slices.Equal(srv.Revoked(), []string{gmailtest.Refresh}) || slices.ContainsFunc(st.Notices, keptText) || !slices.Contains(st.Notices, noteMailReplaced) {
 		t.Fatalf("account %+v, %d slots, revoked %v, notices %v", a.Settings, sec.Len(), srv.Revoked(), st.Notices)
 	}
 }
@@ -1041,7 +1050,7 @@ func TestAKeptGiveBackIsTold(t *testing.T) {
 	if d := signIn(t, srv, owner, "watch", fakeClient); d != DGmailAddress {
 		t.Fatalf("GmailFinish = %q", d)
 	}
-	if st, _ := owner.Status(); !slices.Contains(st.Notices, noteGmailKept) || sec.Len() != 0 {
+	if st, _ := owner.Status(); !slices.ContainsFunc(st.Notices, keptText) || sec.Len() != 0 {
 		t.Fatalf("notices %v, %d slots", st.Notices, sec.Len())
 	}
 }
@@ -1215,7 +1224,7 @@ func TestASignInWithNoAddressKeepsTheAccountsGrantWorking(t *testing.T) {
 			_, err = box.Read(context.Background())
 		}
 		st, _ := owner.Status()
-		if a, _ := owner.Account(); !a.Set || sec.Len() != 1 || srv.Revokes() != 0 || err != nil || !slices.Contains(st.Notices, noteGmailUnnamed) || slices.Contains(st.Notices, noteGmailKept) {
+		if a, _ := owner.Account(); !a.Set || sec.Len() != 1 || srv.Revokes() != 0 || err != nil || !slices.Contains(st.Notices, noteGmailUnnamed) || slices.ContainsFunc(st.Notices, keptText) {
 			t.Fatalf("registration %v: account %+v, %d slots, %d revocations, read %v, notices %v",
 				reg != nil, a.Settings, sec.Len(), srv.Revokes(), err, st.Notices)
 		}

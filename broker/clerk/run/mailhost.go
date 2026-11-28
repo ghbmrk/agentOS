@@ -130,11 +130,13 @@ func stopped(stop error) (detail string, planner error) {
 // worker that reads its alert senders; a given World is used unchanged.
 func NewMailHost(ctx context.Context, dir string, sec *clerk.Secrets, cfg MailConfig) *MailHost {
 	h := &MailHost{ctx: ctx, dir: dir, sec: sec, cfg: cfg, kick: make(chan struct{}, 1)}
+	h.cfg.kept = &gmailKept{}
 	h.own = cfg.World == nil
 	if h.own {
 		h.cfg.World = h.world
 	}
 	h.mu.Lock()
+	h.settleOwed() // before any read: a store a crash left two slots in does not open (CLK-1)
 	h.refresh()
 	h.mu.Unlock()
 	if h.own {
@@ -249,6 +251,7 @@ func (h *MailHost) idle() {
 // unread warm-up notice, which was about it, is dropped.
 func (h *MailHost) changed() {
 	h.changes++
+	h.cfg.kept.drop()
 	h.ws.reset(h.changes)
 	h.srec = nil
 	h.wake()
@@ -257,8 +260,11 @@ func (h *MailHost) changed() {
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
 }
 
-// wrote is the test seam right after a setter's write (MailConfig.wrote).
+// wrote runs right after a setter's write: it drops the kept Gmail API
+// (gmailKept), whether or not the write took, and runs the test seam
+// (MailConfig.wrote).
 func (h *MailHost) wrote() {
+	h.cfg.kept.drop()
 	if h.cfg.wrote != nil {
 		h.cfg.wrote()
 	}
@@ -449,7 +455,10 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		replacing := err == nil
 		release := func() {}
 		if replacing {
-			release = h.holdGmail(prev) // a Gmail account's grant, given back once SetMail drops it (A22)
+			// A Gmail account's grant, given back once SetMail drops it (A22).
+			if release, err = h.holdGmail(prev); err != nil {
+				return nil, err // nothing changed
+			}
 		}
 		end := h.ws.writing() // until the change is told (#3538)
 		err = SetMail(h.dir, h.sec, a.Settings, a.Password)
@@ -475,7 +484,10 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		removing := err == nil
 		release := func() {}
 		if removing {
-			release = h.holdGmail(prev) // a Gmail account's grant, given back once RemoveMail drops it (A22)
+			// A Gmail account's grant, given back once RemoveMail drops it (A22).
+			if release, err = h.holdGmail(prev); err != nil {
+				return nil, err // nothing changed
+			}
 		}
 		end := h.ws.writing()
 		err = RemoveMail(h.dir, h.sec)
