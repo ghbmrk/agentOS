@@ -269,7 +269,8 @@ func TestMutAutoReplyAlertFailsDrops(t *testing.T) {
 	}
 }
 
-// A released ID is forgotten after RetireFor: UNDO then finds nothing.
+// A released ID, and a late UNDO of it, are forgotten after RetireFor:
+// UNDO then finds nothing.
 func TestMutAutoReplyReleasedRetires(t *testing.T) {
 	r := newRig(t, nil)
 	res, err := r.ch.QueueAutoReply(AutoReply{Ref: "r1", Recipients: []string{"sam@example.com"}, Body: "Thanks."})
@@ -282,8 +283,14 @@ func TestMutAutoReplyReleasedRetires(t *testing.T) {
 	if len(r.ch.DueAutoReplies()) != 1 {
 		t.Fatal("not released")
 	}
+	if got := r.say("UNDO " + id); got != id+" is past its undo window; it was released." || !r.ch.UndoneAfterRelease(id) {
+		t.Fatalf("late undo: %q", got)
+	}
 	r.advance(RetireFor)
 	r.ch.DueAutoReplies()
+	if r.ch.UndoneAfterRelease(id) {
+		t.Fatal("a late UNDO outlived RetireFor")
+	}
 	r.ch.mu.Lock()
 	_, kept := r.ch.released[id]
 	r.ch.mu.Unlock()
