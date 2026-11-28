@@ -29,4 +29,5 @@ func TestOpenReleasesEachAsk(t *testing.T) {
 	if n := runtime.NumGoroutine(); n > before {
 		t.Fatalf("Open left an ask's bound running: %d goroutines, was %d", n, before)
 	}
+	localui4Kills(t) // MUT-kill-localui-4 (#6768): subtests, so mutgate's targets stay theirs
 }
