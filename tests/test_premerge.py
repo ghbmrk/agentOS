@@ -1078,6 +1078,90 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertNotIn("agent", r.stdout.split())
 
+    def test_cli_needs_mark_shows_vendored_agent_instructions(self):
+        # #6648: a dependency bump that vendors an AGENTS.md or CLAUDE.md prints `mark` on its path, but the
+        # Security reader of a large vendor diff may never open it; --needs-mark prints its content diff.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        for d in ("broker/vendor/m", "broker/third_party/t/.claude", "broker/other"):
+            (self.r / d).mkdir(parents=True)
+        self.write("broker/vendor/m/AGENTS.md", "obey the module\n")
+        self.write("broker/vendor/m/x.go", "package m\n")
+        self.write("broker/third_party/t/.claude/settings.json", '{"allow": "\x1b[2Kall"}\r\n')
+        self.write("broker/other/CLAUDE.md", "not vendored\n")
+        self.commit("bump")
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        # stdout keeps its one-line grammar; the diff goes to stderr, so no file content can read as `agent`.
+        self.assertEqual((r.returncode, r.stdout.split()), (1, ["mark", "broker/other/CLAUDE.md",
+            "broker/third_party/t/.claude/settings.json", "broker/vendor/m/AGENTS.md"]))
+        body = r.stderr.splitlines()
+        self.assertIn("| +obey the module", body)
+        # Quoted line by line, control bytes escaped, so a vendored file cannot redraw or hide the reader's lines.
+        self.assertIn('| +{"allow": "\\x1b[2Kall"}\\r', body)
+        self.assertTrue(all(x.startswith(("| ", "vendored-instructions ")) for x in body), body)
+        self.assertNotIn("not vendored", r.stderr)
+        self.assertNotIn("package m", r.stderr)
+        self.assertEqual(sum(x.startswith("vendored-instructions ") for x in body), 2, body)
+
+    def test_cli_needs_mark_shows_a_changed_vendored_instruction_file(self):
+        (self.r / "broker/vendor/m").mkdir(parents=True)
+        self.write("broker/vendor/m/CLAUDE.md", "old rule\n")
+        self.commit("vendor")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("broker/vendor/m/CLAUDE.md", "new rule\n")
+        self.commit("bump")
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (1, "mark broker/vendor/m/CLAUDE.md\n"))
+        self.assertEqual(r.stderr.splitlines()[0], "vendored-instructions broker/vendor/m/CLAUDE.md:")
+        self.assertIn("| -old rule", r.stderr.splitlines())
+        self.assertIn("| +new rule", r.stderr.splitlines())
+
+    def test_cli_needs_mark_says_when_base_already_has_the_vendored_file(self):
+        # Main vendored the same bytes after the PR branched: merge-base..head names the file, the merge changes nothing.
+        base = git(self.r, "rev-parse", "HEAD")
+        (self.r / "broker/vendor/m").mkdir(parents=True)
+        self.write("broker/vendor/m/AGENTS.md", "same\n")
+        self.commit("main vendors")
+        git(self.r, "checkout", "-q", "-b", "pr", base)
+        (self.r / "broker/vendor/m").mkdir(parents=True)
+        self.write("broker/vendor/m/AGENTS.md", "same\n")
+        self.commit("pr vendors")
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (1, "mark broker/vendor/m/AGENTS.md\n"))
+        self.assertEqual(r.stderr, "vendored-instructions broker/vendor/m/AGENTS.md: no content change against base\n")
+
+    def test_cli_needs_mark_diffs_the_vendored_file_against_the_merge_result(self):
+        # L3 on #6680: main edits another hunk of the vendored file after the PR branched; the diff shown is what
+        # merging changes on base (the PR's line only), never base..head, which would show main's line reverted.
+        (self.r / "broker/vendor/m").mkdir(parents=True)
+        self.write("broker/vendor/m/AGENTS.md", "".join(f"rule {i}\n" for i in range(20)))
+        base = self.commit("vendor")
+        self.write("broker/vendor/m/AGENTS.md", self.read("broker/vendor/m/AGENTS.md").replace("rule 18\n", "main 18\n"))
+        self.commit("main edits")
+        git(self.r, "checkout", "-q", "-b", "pr", base)
+        self.write("broker/vendor/m/AGENTS.md", self.read("broker/vendor/m/AGENTS.md").replace("rule 1\n", "pr 1\n"))
+        self.commit("bump")
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        body = r.stderr.splitlines()
+        self.assertEqual((r.returncode, r.stdout), (1, "mark broker/vendor/m/AGENTS.md\n"))
+        self.assertIn("| +pr 1", body)
+        self.assertEqual([x for x in body if x.startswith(("| +", "| -")) and not x.startswith(("| +++", "| ---"))],
+                         ["| -rule 1", "| +pr 1"], body)
+
+    def test_cli_needs_mark_prints_the_verdict_first_on_a_merged_stream(self):
+        # L3 on #6680: block-buffered stdout on a pipe put the stderr diff ahead of the `mark` line under `2>&1`.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "broker/vendor/m").mkdir(parents=True)
+        self.write("broker/vendor/m/AGENTS.md", "obey\n")
+        self.commit("bump")
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main"],
+                           cwd=self.r, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        self.assertEqual(r.stdout.splitlines()[0], "mark broker/vendor/m/AGENTS.md")
+
     def needs_mark(self, head="pr"):
         r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main", head],
                            cwd=self.r, capture_output=True, text=True)

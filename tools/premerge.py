@@ -29,7 +29,9 @@ those files need a delta review. Git 2.38 or later, no network; fetch first.
 #2138), that make the PR a gate-file PR (it changes how Claude is permitted or reviewed): prints `mark <files>` and
 exits 1, or `agent` and exits 0 (OPERATING §7). It takes at most one positional
 (the head); a base goes after `--base`, so a second positional, or a base..head with no changed files, is a
-usage error (exit 2).
+usage error (exit 2). With `mark` it also prints to stderr, for each CLAUDE*.md, AGENTS.md, .mcp.json or .claude file under
+broker/vendor/ or broker/third_party/, a `vendored-instructions <file>:` line and that file's content diff against
+base, each line behind `| ` with control characters escaped, so its Security reader sees it in a large vendor diff (#6648).
 
 `--check` is the gate form: it reads a PR's issue comments (a JSON list as the GitHub API returns it), takes
 the newest L3 verdict comment from a repository owner, member or collaborator, and prints `same` (exit 0) only
@@ -145,6 +147,31 @@ MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\
 
 def mark_paths(files):
     return sorted(f for f in files if MARK_PATHS.fullmatch(f))
+
+
+# Agent config a dependency carries (#6648): a large vendor diff hides it from its Security reader, and an agent working
+# in that directory later loads it, so --needs-mark prints its content diff.
+VENDORED_AGENT = re.compile(r"broker/(?:vendor|third_party)/(?:.*/)?(?:CLAUDE(?:\.local)?\.md|AGENTS\.md|\.mcp\.json|"
+                            r"\.claude(?:/.*)?)", re.DOTALL)
+
+
+def _shown(text):
+    """`text` with control and format characters escaped, so it cannot redraw or hide a line (tabs kept)."""
+    return "".join(c if c.isprintable() or c == "\t" else c.encode("unicode_escape").decode() for c in text)
+
+
+def vendored_agent_diff(cwd, base, head, files):
+    """The content diff, base..merge result, of each vendored agent-config file in `files`, quoted line by line."""
+    hit = [f for f in files if VENDORED_AGENT.fullmatch(f)]
+    if not hit:
+        return []
+    tree, out = _replayed(cwd, base, head), []
+    for f in hit:
+        diff = _git(cwd, *DIFF[:-2], "--text", base, tree, "--", ":(literal)" + f)
+        text = diff.decode(errors="backslashreplace").rstrip("\n")
+        out.append(f"vendored-instructions {_shown(f)}:" + ("" if text else " no content change against base"))
+        out += ["| " + _shown(x) for x in text.split("\n")] if text else []
+    return out
 
 
 def mark_range(cwd, base, head):
@@ -1172,7 +1199,9 @@ def main(argv):
             print(f"empty range {base}..{head}: name the PR head", file=sys.stderr)
             return 2
         hit = mark_paths(files)
-        print("mark " + " ".join(hit) if hit else "agent")
+        print("mark " + " ".join(hit) if hit else "agent", flush=True)  # before stderr, so `2>&1` keeps it first
+        for line in vendored_agent_diff(".", base, head, hit):  # #6648: stderr, so stdout's grammar is unchanged
+            print(line, file=sys.stderr)
         return 1 if hit else 0
     if not 1 <= len(args) <= 2:
         print(__doc__)

@@ -12,6 +12,8 @@ It is one of three lenses (security, potency, UX). An arbitrator loop weighs the
 
 Tier A PRs get a Security section in its own fresh session on the strongest model; tier B PRs get Security as part of the combined pass. Each run applies the method below to the PR's diff, not to all of `main`. Verdicts go in a PR comment marked `<!-- record: security -->` (combined passes marked `combined`), in the L3 format and verdict comment shape of docs/OPERATING.md §4. A later delta on a signed tier-A PR needs a re-sign by the mechanical rule in OPERATING §3.
 
+On a gate-file PR, run `python3 tools/premerge.py --needs-mark --base origin/main <head>` without discarding stderr, read every `vendored-instructions` section it prints (the content diff of a CLAUDE*.md, AGENTS.md, .mcp.json or .claude file under `broker/vendor/` or `broker/third_party/`), and name each such file in the verdict (#6648).
+
 ## Checks that replaced findings
 
 Finding kinds CI now catches; the screen no longer looks for them by hand (OPERATING §4).
