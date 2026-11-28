@@ -14,6 +14,8 @@ Tier A PRs get a UX pass in the lens screen; tier B PRs get UX as part of the co
 
 Not on assurance tooling: a tier-A diff confined to `tools/depaudit*`, `tools/canary*`, `assurance/`, `tools/risk_tier*` and their tests gets no UX pass. Those tools' operators are CI and builders, and their messages are `later` (OPERATING §2, D-086). If one of them gains a human operator on the box, restore the pass with one line here.
 
+A UX accept counts only at the head its `Record:` line names: premerge's `--check` reads `needs-lens ux` whenever `premerge.py <ux-head> HEAD` prints `changed`, so a delta review that says UX "carries forward" is wrong unless that command prints `same`; each new head with a changed diff gets its own UX record (#6702 waited on one at 7c3d133f).
+
 Before raising a finding on text shown to the guest, check that a guest can reach it: trace the path from a guest tool call to the text, through the MCP guard and the gate. #461 (SR2-3o) was built for refusals that no guest could reach.
 
 ## Checks that replaced findings
