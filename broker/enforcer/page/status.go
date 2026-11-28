@@ -359,7 +359,7 @@ const (
 
 var (
 	errNoAlert    = errors.New("no open alert with that number; open the home page again")
-	errFixed      = errors.New("this alert clears when the channel resumes")
+	errFixed      = errors.New("this alert clears when you lift the edge's cut or resume the core's channel, whichever it came from; it has no clear of its own")
 	errRevoked    = errors.New("the core's key is already revoked")
 	errNotSpent   = errors.New("the byte caps' day reads back; there is nothing to start afresh")
 	errFreshWaits = errors.New("a fresh day is already waiting")

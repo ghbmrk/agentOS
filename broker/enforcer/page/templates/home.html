@@ -8,7 +8,7 @@
 <p>Policy version {{.Version}}.</p>
 {{if and .Shown (or .Red .Alerts (and .CoreDown .Core))}}
 <h2>Alerts</h2>
-{{if .Red}}<p class="warn">The light is red: a known attack is not resolved. It goes off when the cut lifts or you clear its alert below.</p>{{end}}
+{{if .Red}}<p class="warn">The light is red: a known attack is not resolved. It goes off only when the cut lifts: lift the edge's cut or resume the core's channel here, with your passkey. Its alert has no clear.</p>{{end}}
 {{if and .CoreDown .Core}}<p class="warn">The core is down: the enforcer has not heard from it lately. Your rules here stay as they are, but the enforcer's texts cannot reach your phone while the core is down, so check this page.</p>{{end}}
 {{range .Alerts}}<div class="pending warn">
 <p>{{.Text}}</p>
