@@ -111,9 +111,10 @@ func (c crashStore) Delete(h kernel.Hash) error {
 
 // EraseResult is one erase run.
 type EraseResult struct {
-	Crashed bool   // the armed write was reached
-	Hit     string // what it fell on: log, key or store
-	Erased  int    // plans the erases cancelled
+	Crashed bool           // the armed write was reached
+	Hit     string         // what it fell on: log, key or store
+	Erased  int            // plans the erases cancelled
+	Log     []kernel.Entry // the log the run ended with
 }
 
 // RunErase runs seed with a crash at the crashAt-th write of the erase
@@ -269,6 +270,7 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 	if err := settle(kernel.RetryMax); err != nil {
 		return res, err
 	}
+	res.Log = k.Log().Entries()
 	if err := judgeErase(k, anchors, keys, stores, subs, gone, items); err != nil {
 		return res, err
 	}
