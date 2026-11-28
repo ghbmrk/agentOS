@@ -283,7 +283,7 @@ func TestSharedSegmentRelatedBound(t *testing.T) {
 				in.Write([]byte("injected"))
 				in.Close()
 			})
-			time.Sleep(100 * time.Millisecond)
+			h.barrier(seg+"2", segIfc(seg))
 			const injected, own = 1690, 1691
 			h.sendErr(seg+"2", local, peer, v6, udpErr(v6, injected, peer, local, port, lport))
 			h.sendErr(seg, "", peer, v6, udpErr(v6, own, peer, local, port, lport))
@@ -429,9 +429,13 @@ func TestSharedLabelFreeLoad(t *testing.T) {
 			c.Write([]byte("injected"))
 			c.Close()
 		})
-		time.Sleep(100 * time.Millisecond)
+		h.barrier("guest2", segIfc("guest"))
 	}
 	h.in(h.hosts["guest2"], "ip", "addr", "add", segAddr("guest", 0)+"/32", "dev", "lo")
+	// guest2 would ask for the enforcer's hardware address from the first
+	// guest's address, which the enforcer's ARP check refuses, so the
+	// packets below would never leave it: it knows the address already.
+	h.in(h.hosts["guest2"], "ip", "neigh", "replace", enfAddr("guest"), "lladdr", h.MAC(segIfc("guest")), "nud", "permanent", "dev", "eth0")
 
 	oldLocal, oldPort := flow(9601)
 	h.reload(d)

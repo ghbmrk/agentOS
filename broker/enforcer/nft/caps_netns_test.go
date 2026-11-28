@@ -580,10 +580,36 @@ func TestCapCountsEverySegmentHeader(t *testing.T) {
 		mac := r.h.MAC(tc.port)
 		r.h.In(tc.box, "ip", "neigh", "replace", tc.seg, "lladdr", mac, "nud", "permanent", "dev", "eth0")
 		port := 9400 + i
+		// The server closes once it has read to the end and then says so,
+		// for send's barrier.
+		closed := make(chan struct{}, 2)
 		r.h.Serve(tc.to, port, func(c net.Conn) {
 			c.SetDeadline(time.Now().Add(5 * time.Second))
 			io.Copy(io.Discard, c)
+			c.Close()
+			closed <- struct{}{}
 		})
+		// crossed returns once every packet the box sent on the connection
+		// has crossed the enforcer, which counts a packet before it
+		// forwards it. The server's reading to the end means the box's
+		// data and FIN have; the box's last packet, its ACK of the server's
+		// FIN, has once the server's socket is gone (it leaves LAST_ACK only
+		// on that ACK). Packets the box sent elsewhere are other's.
+		crossed := func() {
+			select {
+			case <-closed:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s: the server did not read the connection to its end within 10s", tc.box)
+			}
+			for end := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+				if strings.TrimSpace(r.h.In("isp", "ss", "-Htn", "state", "connected", "sport", "=", ":"+strconv.Itoa(port))) == "" {
+					return
+				}
+				if time.Now().After(end) {
+					t.Fatalf("%s: the box's last ACK did not reach the server within 10s", tc.box)
+				}
+			}
+		}
 		// sentAndOther reads the box's IP bytes sent and its other counter
 		// as one: a packet elsewhere (an MLD report, at a time the kernel
 		// picks) sent between two lone reads counts in one and not the
@@ -608,7 +634,7 @@ func TestCapCountsEverySegmentHeader(t *testing.T) {
 				n, _ := c.Write(make([]byte, 8<<20))
 				return n
 			})
-			time.Sleep(100 * time.Millisecond) // the last segments cross the enforcer
+			crossed()
 			tx2, o2 := sentAndOther()
 			rest := o2 - o
 			sent = tx2 - tx - rest

@@ -7,7 +7,6 @@ import (
 	"net"
 	"strings"
 	"testing"
-	"time"
 )
 
 // NET-3, NET-1 (#5686): on a shared segment (Guests, Owner, Household) an
@@ -80,14 +79,14 @@ func TestEnforcerOnlyAddressIsHeld(t *testing.T) {
 		t.Helper()
 		a, b := seg6Addr(seg, 0), h.hosts[seg+"2"]
 		h.inject(seg+"2", a, 9801, net6Other, "take")
-		time.Sleep(100 * time.Millisecond)
+		h.barrier(seg+"2", segIfc(seg))
 		own, err := net.ParseMAC(macB[seg])
 		if err != nil {
 			t.Fatal(err)
 		}
 		na := append(binary.BigEndian.AppendUint32([]byte{136, 0, 0, 0}, 0x20000000), net.ParseIP(a).To16()...)
 		h.frame(b, 0x86dd, allNodes, icmp6(a, "ff02::1", append(na, append([]byte{2, 1}, own...)...)))
-		time.Sleep(100 * time.Millisecond)
+		h.barrier(seg+"2", segIfc(seg))
 	}
 
 	for _, seg := range segs {
