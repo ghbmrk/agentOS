@@ -48,10 +48,10 @@ func TestFailedWipeIsToldInStatus(t *testing.T) {
 	path := filepath.Join(dir, "failed")
 	cfg := daemon.Config{}
 	cfg.Notes = append(cfg.Notes, wipeNote([]string{path}))
-	run := func(result, code, status string) {
+	run := func(result string) {
 		t.Helper()
 		c := exec.Command("/bin/sh", "-c", stop)
-		c.Env = []string{"STATE_DIRECTORY=" + dir, "SERVICE_RESULT=" + result, "EXIT_CODE=" + code, "EXIT_STATUS=" + status}
+		c.Env = []string{"STATE_DIRECTORY=" + dir, "SERVICE_RESULT=" + result}
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v %s", result, err, out)
 		}
@@ -59,21 +59,29 @@ func TestFailedWipeIsToldInStatus(t *testing.T) {
 	if got := statusNotes(&cfg); len(got) != 0 {
 		t.Fatalf("before any shutdown: %q", got)
 	}
-	for _, failed := range [][3]string{{"exit-code", "exited", "1"}, {"timeout", "killed", "TERM"}, {"signal", "killed", "KILL"}} {
-		run(failed[0], failed[1], failed[2])
+	for _, failed := range []string{"exit-code", "timeout", "signal"} {
+		run(failed)
 		if got := statusNotes(&cfg); len(got) != 1 || got[0] != wipeFailedLine {
-			t.Fatalf("after a %s wipe: %q", failed[0], got)
+			t.Fatalf("after a %s wipe: %q", failed, got)
 		}
-		if b, _ := os.ReadFile(path); string(b) != strings.Join(failed[:], " ")+"\n" {
+		if b, _ := os.ReadFile(path); string(b) != failed+"\n" {
 			t.Fatalf("record %q", b)
 		}
-		run("success", "exited", "0")
+		// The next shutdown fails too: the line stops asking for a restart.
+		run(failed)
+		if got := statusNotes(&cfg); len(got) != 1 || got[0] != wipeFailedAgain {
+			t.Fatalf("after a second %s wipe: %q", failed, got)
+		}
+		if b, _ := os.ReadFile(path); string(b) != failed+" again\n" {
+			t.Fatalf("second record %q", b)
+		}
+		run("success")
 		if got := statusNotes(&cfg); len(got) != 0 {
 			t.Fatalf("after a good wipe: %q", got)
 		}
 	}
 	// A good wipe with no record leaves none.
-	run("success", "exited", "0")
+	run("success")
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("record after a good wipe: %v", err)
 	}
@@ -94,11 +102,11 @@ func TestRefusedClearIsToldInStatus(t *testing.T) {
 	}
 	stop := strings.ReplaceAll(unitValue(t, string(b), "ExecStopPost"), "$$", "$")
 	shipped := filepath.Dir(wipeFailed[1])
-	if n := strings.Count(stop, wipeFailed[1]); n != 3 {
-		t.Fatalf("the unit names %s %d times, want 3: %s", wipeFailed[1], n, stop)
+	if n := strings.Count(stop, wipeFailed[1]); n != 4 {
+		t.Fatalf("the unit names %s %d times, want 4: %s", wipeFailed[1], n, stop)
 	}
-	if n := strings.Count(stop, shipped); n != 4 {
-		t.Fatalf("the unit names %s %d times, want 4: %s", shipped, n, stop)
+	if n := strings.Count(stop, shipped); n != 5 {
+		t.Fatalf("the unit names %s %d times, want 5: %s", shipped, n, stop)
 	}
 	// The record's directory is made at the stop, never at the start.
 	dir := filepath.Join(t.TempDir(), "agentos-mor")
@@ -168,12 +176,92 @@ func TestUncheckableWipeRecordIsTold(t *testing.T) {
 }
 
 func TestWipeLineIsOwnerWorded(t *testing.T) {
-	if err := ownerWorded(wipeFailedLine); err != nil {
-		t.Fatal(err)
+	for _, l := range []string{wipeFailedLine, wipeFailedAgain} {
+		if err := ownerWorded(l); err != nil {
+			t.Fatalf("%q: %v", l, err)
+		}
+	}
+	if wipeFailedAgain != "Shutdown: my last one could not finish erasing my memory; tell support." {
+		t.Fatalf("line %q", wipeFailedAgain)
 	}
 	// Without its full stop the line is refused: the check reads the
 	// whole sentence, not only its head and fix.
 	if ownerWorded(strings.TrimSuffix(wipeFailedLine, ".")) == nil {
 		t.Fatal("a line with no full stop passed")
+	}
+}
+
+// MOR-clear-owner-fu (#6133): a clear that fails at two shutdowns in a row
+// leaves a record ending " again", and STATUS stops asking for a restart,
+// which has been tried. The shipped step writes the record; the first
+// failure's line still asks for one.
+func TestRepeatedClearFailureStopsAskingForRestart(t *testing.T) {
+	b, err := os.ReadFile(morUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := strings.ReplaceAll(unitValue(t, string(b), "ExecStopPost"), "$$", "$")
+	dir := filepath.Join(t.TempDir(), "agentos-mor")
+	stop = strings.ReplaceAll(stop, filepath.Dir(wipeFailed[1]), dir)
+	record := filepath.Join(dir, "refused")
+	run := func(result string) {
+		t.Helper()
+		c := exec.Command("/bin/sh", "-c", stop)
+		c.Env = []string{"SERVICE_RESULT=" + result, "EXIT_CODE=exited", "EXIT_STATUS=1"}
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v %s", result, err, out)
+		}
+	}
+	note := wipeNote([]string{filepath.Join(t.TempDir(), "failed"), record})
+	run("exit-code")
+	if got := note(); got != wipeFailedLine {
+		t.Fatalf("first failure: %q", got)
+	}
+	run("exit-code")
+	if got, _ := os.ReadFile(record); string(got) != "exit-code exited 1 again\n" {
+		t.Fatalf("record %q", got)
+	}
+	if got := note(); got != wipeFailedAgain {
+		t.Fatalf("second failure: %q", got)
+	}
+	run("success")
+	if got := note(); got != "" {
+		t.Fatalf("after a good clear: %q", got)
+	}
+	// A failure after a good clear is a first one again.
+	run("exit-code")
+	if got := note(); got != wipeFailedLine {
+		t.Fatalf("failure after a good clear: %q", got)
+	}
+	// A first-failure record beside an " again" one: the later record wins,
+	// whichever order the paths are in.
+	first := filepath.Join(t.TempDir(), "failed")
+	if err := os.WriteFile(first, []byte("exit-code\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("exit-code")
+	run("exit-code")
+	for _, paths := range [][]string{{first, record}, {record, first}} {
+		if got := wipeNote(paths)(); got != wipeFailedAgain {
+			t.Fatalf("%q: %q", paths, got)
+		}
+	}
+	// A record that is there but cannot be read (a directory) or is a link
+	// asks for a restart, and so does one that is only told once.
+	dirRec := filepath.Join(t.TempDir(), "refused")
+	if err := os.Mkdir(dirRec, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(record, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{dirRec, link} {
+		if got := wipeNote([]string{p})(); got != wipeFailedLine {
+			t.Fatalf("%s: %q", p, got)
+		}
+	}
+	if got := wipeNote([]string{first, filepath.Join(t.TempDir(), "x")})(); got != wipeFailedLine {
+		t.Fatalf("first record only: %q", got)
 	}
 }

@@ -29,10 +29,13 @@ StandardError=journal
 # The error is kept on disk (image/ASSUMPTIONS.md MOR-wipe-journal, #6078), and the owner is told in
 # STATUS (MOR-wipe-owner, #6094): whatever the stop's result, this records it, removing the file on
 # success and writing it on any failure; agentosd's STATUS shows a line while it exists
-# (broker/cmd/agentosd/wipenote.go), so until a later shutdown's wipe succeeds.
+# (broker/cmd/agentosd/wipenote.go), so until a later shutdown's wipe succeeds. The record is the
+# result alone: the unit has no main process, so systemd sets no EXIT_CODE or EXIT_STATUS. A record
+# already there means the last shutdown failed too, so the new one ends " again" and STATUS stops
+# asking for a restart (MOR-clear-owner-fu, #6133).
 StateDirectory=agentos-wipe
 StateDirectoryMode=0700
-ExecStopPost=/usr/bin/sh -c 'if [ "$$SERVICE_RESULT" = success ]; then exec /usr/bin/rm -f -- "$$STATE_DIRECTORY/failed"; fi; echo "$$SERVICE_RESULT $$EXIT_CODE $$EXIT_STATUS" >"$$STATE_DIRECTORY/failed"'
+ExecStopPost=/usr/bin/sh -c 'if [ "$$SERVICE_RESULT" = success ]; then exec /usr/bin/rm -f -- "$$STATE_DIRECTORY/failed"; fi; a=; [ -e "$$STATE_DIRECTORY/failed" ] && a=" again"; echo "$$SERVICE_RESULT$$a" >"$$STATE_DIRECTORY/failed"'
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=full
