@@ -20,7 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/smsapi"
 )
 
-// REQ: CH-7, CRED-8, CAP-9, ADP-12, LOG-4
+// REQ: CH-7, LOG-4
 
 // MUT-kill-localui-9 (#6773): checks that kill the mutgate survivors in
 // scan.go, secondline.go, forget.go and providers.go. The handlers are
