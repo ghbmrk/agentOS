@@ -88,4 +88,22 @@ func TestMut10AccountPlanWithUnreadableSettingsIsAnError(t *testing.T) {
 	if p, err := h.accountPlan(); !errors.Is(err, errMailUnreadable) {
 		t.Fatalf("unreadable settings: %+v, %v; want errMailUnreadable", p, err)
 	}
+	if !h.mu.TryLock() {
+		t.Fatal("the unreadable-settings answer left the host locked")
+	}
+	h.mu.Unlock()
+}
+
+// A key call the store refuses is an error: a malformed key is a form
+// error, a relabel of no key the store's own.
+func TestMut10KeyCallsReportTheStoresRefusal(t *testing.T) {
+	apis := mut10APIs(t)
+	p := model.Shipped[0].Provider
+	raw, _ := json.Marshal(keyArgs{Provider: p, Key: "", Private: true})
+	if _, err := serveKeyCall(apis, "apikeyset", raw); !errors.Is(err, model.ErrKeyForm) {
+		t.Errorf("an empty key: %v; want ErrKeyForm", err)
+	}
+	if _, err := serveKeyCall(apis, "apikeyprivate", raw); !errors.Is(err, errKeyStore) {
+		t.Errorf("relabelling no key: %v; want errKeyStore", err)
+	}
 }
